@@ -540,6 +540,206 @@ def test_list_zip():
     assert events == []
 
 
+# ── live_loop time isolation ──────────────────────────────────────────────
+
+def test_two_live_loops_start_at_t0():
+    """Both live_loops should produce events starting at t=0."""
+    events = synths(
+        "live_loop :a do\n  play 60\n  sleep 1\nend\n"
+        "live_loop :b do\n  play 64\n  sleep 1\nend",
+        iters=2,
+    )
+    times_a = sorted(e.time for e in events if abs(e.args['note'] - 60.0) < 0.01)
+    times_b = sorted(e.time for e in events if abs(e.args['note'] - 64.0) < 0.01)
+    assert abs(times_a[0] - 0.0) < 0.01
+    assert abs(times_b[0] - 0.0) < 0.01
+
+
+def test_live_loop_code_after_loop_at_t0():
+    """Code after a live_loop should execute from t=0, not after loop end."""
+    events = synths(
+        "live_loop :foo do\n  play 60\n  sleep 10\nend\nplay 72",
+        iters=1,
+    )
+    note_72 = [e for e in events if abs(e.args['note'] - 72.0) < 0.01]
+    assert len(note_72) == 1
+    assert abs(note_72[0].time - 0.0) < 0.01
+
+
+# ── for loop ─────────────────────────────────────────────────────────────
+
+def test_for_loop_range():
+    events = synths("for i in 1..4\n  play i * 10\nend")
+    assert len(events) == 4
+
+
+def test_for_loop_range_values():
+    events = synths("for i in (1..3)\n  play i * 10\nend")
+    notes = sorted(e.args['note'] for e in events)
+    assert notes == [10.0, 20.0, 30.0]
+
+
+def test_for_loop_array():
+    events = synths("for n in [60, 64, 67]\n  play n\nend")
+    notes = sorted(e.args['note'] for e in events)
+    assert notes == [60.0, 64.0, 67.0]
+
+
+def test_for_loop_exclusive_range():
+    events = synths("for i in 1...4\n  play i * 10\nend")
+    assert len(events) == 3
+
+
+# ── until loop ───────────────────────────────────────────────────────────
+
+def test_until_loop():
+    events = synths("i = 0\nuntil i >= 3\n  play 60\n  i += 1\nend")
+    assert len(events) == 3
+
+
+def test_until_never_fires_if_true():
+    events = synths("until true\n  play 60\nend")
+    assert len(events) == 0
+
+
+# ── play_pattern_timed ────────────────────────────────────────────────────
+
+def test_play_pattern_timed_count():
+    events = synths("play_pattern_timed [60, 64, 67], [0.5, 0.5, 0.5]")
+    assert len(events) == 3
+
+
+def test_play_pattern_timed_notes():
+    events = synths("play_pattern_timed [60, 64, 67], [1]")
+    notes = sorted(e.args['note'] for e in events)
+    assert notes == [60.0, 64.0, 67.0]
+
+
+def test_play_pattern_timed_timing():
+    events = synths("use_bpm 60\nplay_pattern_timed [60, 64], [1, 2]")
+    times = [e.time for e in events]
+    assert abs(times[0] - 0.0) < 0.01
+    assert abs(times[1] - 1.0) < 0.01
+
+
+def test_play_pattern_timed_wraps_timing():
+    # timing shorter than notes → wraps
+    events = synths("play_pattern_timed [60, 64, 67, 72], [0.5]")
+    assert len(events) == 4
+
+
+# ── play_pattern ─────────────────────────────────────────────────────────
+
+def test_play_pattern_count():
+    events = synths("play_pattern [60, 64, 67]")
+    assert len(events) == 3
+
+
+def test_play_pattern_notes():
+    events = synths("play_pattern [60, 64, 67]")
+    notes = sorted(e.args['note'] for e in events)
+    assert notes == [60.0, 64.0, 67.0]
+
+
+# ── play_chord ────────────────────────────────────────────────────────────
+
+def test_play_chord_simultaneous():
+    events = synths("use_bpm 60\nplay_chord [60, 64, 67]")
+    assert len(events) == 3
+    # All at same time
+    assert all(abs(e.time - events[0].time) < 0.01 for e in events)
+
+
+def test_play_chord_notes():
+    events = synths("play_chord [60, 64, 67]")
+    notes = sorted(e.args['note'] for e in events)
+    assert notes == [60.0, 64.0, 67.0]
+
+
+# ── with_bpm_mul ─────────────────────────────────────────────────────────
+
+def test_with_bpm_mul_doubles_speed():
+    # at 60bpm, 2× mul → 120bpm → 1 beat = 0.5s
+    events = synths("use_bpm 60\nwith_bpm_mul 2 do\n  play 60\n  sleep 1\n  play 64\nend")
+    times = sorted(e.time for e in events)
+    assert abs(times[1] - times[0] - 0.5) < 0.01
+
+
+def test_with_bpm_mul_restores():
+    events = synths("use_bpm 60\nwith_bpm_mul 4 do\n  play 60\n  sleep 1\nend\nplay 64\nsleep 1\nplay 67")
+    times = sorted(e.time for e in events)
+    # Third note (67) should be 1s after second (after BPM restored to 60)
+    assert abs(times[2] - times[1] - 1.0) < 0.01
+
+
+# ── use_cent_tuning ───────────────────────────────────────────────────────
+
+def test_use_cent_tuning_sharpens():
+    # 100 cents = 1 semitone. 50 cents = 0.5 semitone
+    events = synths("use_cent_tuning 100\nplay 60")
+    assert abs(events[0].args['note'] - 61.0) < 0.01
+
+
+def test_with_cent_tuning_restores():
+    events = synths("with_cent_tuning 100 do\n  play 60\nend\nplay 60")
+    assert abs(events[0].args['note'] - 61.0) < 0.01
+    assert abs(events[1].args['note'] - 60.0) < 0.01
+
+
+def test_cent_tuning_negative():
+    events = synths("use_cent_tuning(-50)\nplay 60")
+    assert abs(events[0].args['note'] - 59.5) < 0.01
+
+
+# ── get / set ─────────────────────────────────────────────────────────────
+
+def test_set_and_get():
+    events = synths("set :note, 72\nplay get(:note)")
+    assert len(events) == 1
+    assert abs(events[0].args['note'] - 72.0) < 0.01
+
+
+def test_get_default():
+    events = synths("play get(:missing, default: 60)")
+    assert len(events) == 1
+    assert abs(events[0].args['note'] - 60.0) < 0.01
+
+
+def test_set_overwrite():
+    events = synths("set :n, 60\nset :n, 64\nplay get(:n)")
+    assert abs(events[0].args['note'] - 64.0) < 0.01
+
+
+# ── beat / sleep_bpm ─────────────────────────────────────────────────────
+
+def test_beat_returns_time():
+    events = ev("use_bpm 60\nsleep 2\nx = beat")
+    assert events == []  # no sound, just verify it runs
+
+
+def test_sleep_bpm_advances():
+    events = synths("use_bpm 120\nplay 60\nsleep_bpm 1\nplay 64")
+    times = [e.time for e in events]
+    # sleep_bpm 1 = 1 beat at 120bpm = 0.5s
+    assert abs(times[1] - times[0] - 0.5) < 0.01
+
+
+# ── reset_tick ────────────────────────────────────────────────────────────
+
+def test_reset_tick():
+    events = synths(
+        "notes = [60, 64, 67]\n"
+        "play notes.tick\n"
+        "play notes.tick\n"
+        "reset_tick\n"
+        "play notes.tick"
+    )
+    notes = [e.args['note'] for e in events]
+    assert abs(notes[0] - 60.0) < 0.01
+    assert abs(notes[1] - 64.0) < 0.01
+    assert abs(notes[2] - 60.0) < 0.01  # reset → back to index 0
+
+
 if __name__ == "__main__":
     import pytest
     pytest.main([__file__, "-v"])

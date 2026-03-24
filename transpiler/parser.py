@@ -106,6 +106,10 @@ class Parser:
             return self._parse_unless()
         if self.match(TT.WHILE):
             return self._parse_while()
+        if self.match(TT.UNTIL):
+            return self._parse_until()
+        if self.match(TT.FOR):
+            return self._parse_for()
         if self.match(TT.CASE):
             return self._parse_case()
         if self.match(TT.DEF):
@@ -300,6 +304,14 @@ class Parser:
             self.advance()
             cond = self._parse_expr()
             return IfStmt(UnaryOp('not', cond), [node], [], None)
+        if self.match(TT.UNTIL):
+            self.advance()
+            cond = self._parse_expr()
+            return WhileStmt(UnaryOp('not', cond), [node])
+        if self.match(TT.WHILE):
+            self.advance()
+            cond = self._parse_expr()
+            return WhileStmt(cond, [node])
 
         return node
 
@@ -613,6 +625,29 @@ class Parser:
         body = self._parse_body_until(TT.END)
         self.expect(TT.END)
         return WhileStmt(cond, body)
+
+    def _parse_until(self) -> WhileStmt:
+        self.expect(TT.UNTIL)
+        cond = self._parse_expr()
+        if self.match(TT.DO):
+            self.advance()
+        self.skip_newlines()
+        body = self._parse_body_until(TT.END)
+        self.expect(TT.END)
+        return WhileStmt(UnaryOp('not', cond), body)
+
+    def _parse_for(self) -> MethodCall:
+        """for x in collection → collection.each do |x| body end"""
+        self.expect(TT.FOR)
+        var = self.expect(TT.IDENT).value
+        self.expect(TT.IN)
+        collection = self._parse_expr()
+        if self.match(TT.DO) or self.match(TT.NEWLINE):
+            self.advance()
+        self.skip_newlines()
+        body = self._parse_body_until(TT.END)
+        self.expect(TT.END)
+        return MethodCall(collection, 'each', [], {}, Block([var], body))
 
     def _parse_case(self) -> CaseStmt:
         self.expect(TT.CASE)

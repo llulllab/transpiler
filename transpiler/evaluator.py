@@ -121,7 +121,9 @@ class Evaluator:
         self._fx_stack: list[_FXFrame] = []
         self._transpose: float = 0.0     # semitone offset (use_transpose)
         self._octave: float = 0.0        # octave shift    (use_octave)
+        self._cent_tuning: float = 0.0   # cent offset     (use_cent_tuning)
         self._user_funcs: dict[str, FuncDef] = {}  # define/def storage
+        self._store: dict[str, Any] = {}  # get/set shared key-value store
 
         # ── global counters ───────────────────────────────────────────────
         self._node_id: int = 1000
@@ -190,6 +192,7 @@ class Evaluator:
             'fx_stack': list(self._fx_stack),
             'transpose': self._transpose,
             'octave': self._octave,
+            'cent_tuning': self._cent_tuning,
         }
 
     def _restore_state(self, snap: dict):
@@ -202,6 +205,7 @@ class Evaluator:
         self._fx_stack = snap['fx_stack']
         self._transpose = snap.get('transpose', 0.0)
         self._octave = snap.get('octave', 0.0)
+        self._cent_tuning = snap.get('cent_tuning', 0.0)
 
     # ── Public API ───────────────────────────────────────────────────────
 
@@ -248,7 +252,8 @@ class Evaluator:
     # ── Variables ────────────────────────────────────────────────────────
 
     # Built-in no-arg calls that should execute even when parsed as Identifier
-    _BARE_BUILTINS = {'stop', 'coin_flip'}
+    _BARE_BUILTINS = {'stop', 'coin_flip', 'reset_tick', 'tick', 'look',
+                      'beat', 'current_beat', 'free_all'}
 
     def _eval_Identifier(self, n: Identifier) -> Any:
         val = self._variables.get(n.name)
@@ -462,11 +467,31 @@ class Evaluator:
             'defonce':             self._call_define,
             # Swing
             'with_swing':          self._call_with_swing,
+            # Pattern helpers
+            'play_pattern_timed':  self._call_play_pattern_timed,
+            'play_pattern':        self._call_play_pattern,
+            'play_chord':          self._call_play_chord,
+            # BPM multiplier
+            'with_bpm_mul':        self._call_with_bpm_mul,
+            'use_bpm_mul':         self._call_with_bpm_mul,
             # Loop (infinite loop, unrolled like live_loop)
             'loop':                self._call_loop,
             # Random seed
             'use_random_seed':     self._call_use_random_seed,
             'with_random_seed':    self._call_with_random_seed,
+            # Cent tuning
+            'use_cent_tuning':     self._call_use_cent_tuning,
+            'with_cent_tuning':    self._call_with_cent_tuning,
+            # Beat / time helpers
+            'beat':                self._call_beat,
+            'sleep_bpm':           self._call_sleep_bpm,
+            'current_beat':        self._call_beat,
+            # Tick helpers
+            'reset_tick':          self._call_reset_tick,
+            'tick_set':            self._call_tick_set,
+            # Key-value store
+            'set':                 self._call_set,
+            'get':                 self._call_get,
             # Noops
             'load_sample':         self._call_noop,
             'load_samples':        self._call_noop,
@@ -474,16 +499,23 @@ class Evaluator:
             'print':               self._call_noop,
             'p':                   self._call_noop,
             'with_fx_level':       self._call_noop,
-            'set':                 self._call_noop,
-            'get':                 self._call_noop,
             'sync':                self._call_noop,
             'cue':                 self._call_noop,
             'comment':             self._call_noop,
             'uncomment':           self._call_noop,
             'use_timing_guarantees': self._call_noop,
             'use_real_time':       self._call_noop,
+            'use_debug':           self._call_noop,
+            'use_arg_checks':      self._call_noop,
+            'use_midi_defaults':   self._call_noop,
             'spark':               self._call_noop,
             'midi':                self._call_noop,
+            'assert':              self._call_noop,
+            'assert_equal':        self._call_noop,
+            'run_file':            self._call_noop,
+            'load_synthdefs':      self._call_noop,
+            'free_all':            self._call_noop,
+            'with_efx':            self._call_with_fx,   # alias
         }
 
         handler = dispatch.get(method)
@@ -811,7 +843,7 @@ class Evaluator:
             return None
         if midi is None:
             return None
-        return midi + self._transpose + self._octave * 12
+        return midi + self._transpose + self._octave * 12 + self._cent_tuning / 100.0
 
     # ── sleep ────────────────────────────────────────────────────────────
 
@@ -1077,6 +1109,8 @@ class Evaluator:
                 self._eval_body(node.block.body)
             except StopIteration_:
                 break
+        # Restore parent time/state so parallel live_loops all start at same base time
+        self._restore_state(snap)
 
     # ── in_thread ────────────────────────────────────────────────────────
 
@@ -1513,6 +1547,131 @@ class Evaluator:
         """with_swing(amount) do...end – approximated: just run block."""
         if node.block:
             self._eval_body(node.block.body)
+
+    # ── Pattern helpers ───────────────────────────────────────────────────
+
+    def _emit_play_note(self, note_val: Any, kwargs: dict):
+        """Shared helper: emit one note (or list) with merged kwargs/defaults."""
+        if not kwargs.get('on', True):
+            return
+        merged = dict(self._synth_defaults)
+        merged.update({k: v for k, v in kwargs.items() if k != 'on'})
+        pitch = self._to_float(merged.pop('pitch', 0), 0.0)
+        if isinstance(note_val, list):
+            for n in note_val:
+                midi = self._resolve_note(n)
+                if midi is not None:
+                    a = dict(merged)
+                    a['note'] = midi + pitch
+                    a.setdefault('amp', 1.0); a.setdefault('pan', 0.0)
+                    a.setdefault('attack', 0.0); a.setdefault('decay', 0.0)
+                    a.setdefault('sustain', 0.0); a.setdefault('release', 1.0)
+                    a['out_bus'] = self._current_bus_out()
+                    self._emit_synth(self._current_synth, a)
+        else:
+            midi = self._resolve_note(note_val)
+            if midi is not None:
+                a = dict(merged)
+                a['note'] = midi + pitch
+                a.setdefault('amp', 1.0); a.setdefault('pan', 0.0)
+                a.setdefault('attack', 0.0); a.setdefault('decay', 0.0)
+                a.setdefault('sustain', 0.0); a.setdefault('release', 1.0)
+                a['out_bus'] = self._current_bus_out()
+                self._emit_synth(self._current_synth, a)
+
+    def _call_play_pattern_timed(self, node: MethodCall):
+        """play_pattern_timed notes, times, **kwargs"""
+        args, kwargs = self._eval_args(node)
+        notes = args[0] if args and isinstance(args[0], list) else []
+        times = args[1] if len(args) > 1 else [1.0]
+        if not isinstance(times, list):
+            times = [self._to_float(times, 1.0)]
+        for i, note in enumerate(notes):
+            self._emit_play_note(note, kwargs)
+            self._time += self._to_float(times[i % len(times)], 1.0)
+
+    def _call_play_pattern(self, node: MethodCall):
+        """play_pattern notes, **kwargs  (sleep 1 between each note)"""
+        args, kwargs = self._eval_args(node)
+        notes = args[0] if args and isinstance(args[0], list) else args
+        beat = self._to_float(kwargs.pop('sleep_time', 1.0), 1.0)
+        for note in notes:
+            self._emit_play_note(note, kwargs)
+            self._time += beat
+
+    def _call_play_chord(self, node: MethodCall):
+        """play_chord [notes], **kwargs  (all simultaneously, no advance)"""
+        args, kwargs = self._eval_args(node)
+        notes = args[0] if args and isinstance(args[0], list) else args
+        for note in notes:
+            self._emit_play_note(note, kwargs)
+
+    def _call_with_bpm_mul(self, node: MethodCall):
+        """with_bpm_mul n do...end – multiply BPM by n within block."""
+        args, _ = self._eval_args(node)
+        mul = self._to_float(args[0] if args else 1.0, 1.0)
+        old_bpm = self._bpm
+        if mul > 0:
+            self._bpm *= mul
+        if node.block:
+            self._eval_body(node.block.body)
+        self._bpm = old_bpm
+
+    # ── Cent tuning ───────────────────────────────────────────────────────
+
+    def _call_use_cent_tuning(self, node: MethodCall):
+        args, _ = self._eval_args(node)
+        self._cent_tuning = self._to_float(args[0] if args else 0)
+
+    def _call_with_cent_tuning(self, node: MethodCall):
+        args, _ = self._eval_args(node)
+        old = self._cent_tuning
+        self._cent_tuning = self._to_float(args[0] if args else 0)
+        if node.block:
+            self._eval_body(node.block.body)
+        self._cent_tuning = old
+
+    # ── Beat / time helpers ───────────────────────────────────────────────
+
+    def _call_beat(self, node: MethodCall) -> float:
+        """Return current beat position."""
+        return self._time
+
+    def _call_sleep_bpm(self, node: MethodCall):
+        """sleep_bpm n – sleep for n beats regardless of current BPM."""
+        args, _ = self._eval_args(node)
+        beats = self._to_float(args[0] if args else 1, 1.0)
+        self._time += beats
+
+    # ── Tick helpers ──────────────────────────────────────────────────────
+
+    def _call_reset_tick(self, node: MethodCall):
+        args, _ = self._eval_args(node)
+        key = str(args[0]).lstrip(':') if args else '_default'
+        self._variables[f'__tick_{key}'] = 0
+
+    def _call_tick_set(self, node: MethodCall):
+        args, _ = self._eval_args(node)
+        key = str(args[0]).lstrip(':') if args else '_default'
+        val = int(args[1]) if len(args) > 1 else 0
+        self._variables[f'__tick_{key}'] = val
+
+    # ── Key-value store ───────────────────────────────────────────────────
+
+    def _call_set(self, node: MethodCall):
+        args, _ = self._eval_args(node)
+        key = str(args[0]).lstrip(':') if args else None
+        val = args[1] if len(args) > 1 else None
+        if key:
+            self._store[key] = val
+
+    def _call_get(self, node: MethodCall) -> Any:
+        args, kwargs = self._eval_args(node)
+        key = str(args[0]).lstrip(':') if args else None
+        default = kwargs.get('default', None)
+        if key:
+            return self._store.get(key, default)
+        return default
 
 
 # ---------------------------------------------------------------------------
