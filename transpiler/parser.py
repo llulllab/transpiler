@@ -279,11 +279,20 @@ class Parser:
             # .method_name ...
             if self.match(TT.DOT):
                 self.advance()
-                if not self.match(TT.IDENT):
+                # .( args ) shorthand for .call( args )
+                if self.match(TT.LPAREN):
+                    self.advance()
+                    self.skip_newlines()
+                    args, kwargs = self._parse_arg_list_parens()
+                    self.expect(TT.RPAREN)
+                    block = self._parse_block_opt()
+                    node = MethodCall(node, 'call', args, kwargs, block)
+                elif not self.match(TT.IDENT):
                     break
-                method = self.advance().value
-                args, kwargs, block = self._parse_call_tail()
-                node = MethodCall(node, method, args, kwargs, block)
+                else:
+                    method = self.advance().value
+                    args, kwargs, block = self._parse_call_tail()
+                    node = MethodCall(node, method, args, kwargs, block)
 
             # [index]
             elif self.match(TT.LBRACKET):

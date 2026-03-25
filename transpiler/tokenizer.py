@@ -310,6 +310,11 @@ def tokenize(source: str) -> list[Token]:
                 m = re.match(r':[a-zA-Z_][a-zA-Z0-9_?!]*', source[pos:])
                 add(TT.SYMBOL, m.group()[1:])
                 pos += len(m.group())
+            elif pos + 1 < length and source[pos + 1] in '+-*/%<>=!':
+                # Operator symbols: :+  :-  :*  :/  :==  :!=  :<=  :>=  :<  :>
+                m = re.match(r':[+\-*/%<>=!]+', source[pos:])
+                add(TT.SYMBOL, m.group()[1:])
+                pos += len(m.group())
             else:
                 add(TT.COLON, ':')
                 pos += 1

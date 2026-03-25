@@ -65,6 +65,14 @@ class SoundEvent:
 
 
 @dataclass
+class _Lambda:
+    """Callable object created by lambda or proc."""
+    params: list
+    body: list   # AST nodes
+    closure: dict
+
+
+@dataclass
 class _FXFrame:
     """Tracks an active with_fx context."""
     fx_name: str         # e.g. 'reverb'
@@ -266,6 +274,13 @@ class Evaluator:
         return result
 
     def _eval_Identifier(self, n: Identifier) -> Any:
+        # Special module/class sentinels
+        if n.name == 'Math':
+            return '__Math__'
+        if n.name in ('Array', 'Integer', 'Float', 'String', 'Hash',
+                       'Numeric', 'NilClass', 'TrueClass', 'FalseClass',
+                       'Fixnum', 'Bignum'):
+            return n.name  # return class name as string for is_a? etc.
         val = self._variables.get(n.name)
         if val is None and n.name in self._user_funcs:
             # Bare identifier matching a user function → call with no args
@@ -337,14 +352,14 @@ class Evaluator:
     def _eval_IfStmt(self, n: IfStmt):
         cond = self._eval_node(n.condition)
         if cond:
-            self._eval_body(n.then_body)
+            return self._eval_body_last(n.then_body)
         else:
             for ec, eb in n.elsif_clauses:
                 if self._eval_node(ec):
-                    self._eval_body(eb)
-                    return
+                    return self._eval_body_last(eb)
             if n.else_body:
-                self._eval_body(n.else_body)
+                return self._eval_body_last(n.else_body)
+        return None
 
     def _eval_WhileStmt(self, n: WhileStmt):
         guard = 0
@@ -512,6 +527,16 @@ class Evaluator:
             # Key-value store
             'set':                 self._call_set,
             'get':                 self._call_get,
+            # Lambda / Proc
+            'lambda':              self._call_lambda,
+            'proc':                self._call_lambda,
+            # Type conversions
+            'Integer':             self._call_integer_conv,
+            'Float':               self._call_float_conv,
+            'String':              self._call_string_conv,
+            # Pitch / frequency helpers
+            'pitch_to_ratio':      self._call_pitch_to_ratio,
+            'ratio_to_pitch':      self._call_ratio_to_pitch,
             # Noops
             'load_sample':         self._call_noop,
             'load_samples':        self._call_noop,
@@ -558,6 +583,61 @@ class Evaluator:
         method = node.method
         recv_val = self._eval_node(node.receiver)
 
+        # Math module  Math.sqrt(...) etc.
+        if recv_val == '__Math__':
+            args = [self._eval_node(a) for a in node.args]
+            x = self._to_float(args[0]) if args else 0.0
+            if method == 'sqrt':   return math.sqrt(max(0.0, x))
+            if method == 'sin':    return math.sin(x)
+            if method == 'cos':    return math.cos(x)
+            if method == 'tan':    return math.tan(x)
+            if method == 'log':    return math.log(x) if x > 0 else 0.0
+            if method == 'log2':   return math.log2(x) if x > 0 else 0.0
+            if method == 'log10':  return math.log10(x) if x > 0 else 0.0
+            if method == 'exp':    return math.exp(x)
+            if method == 'cbrt':
+                return math.copysign(abs(x) ** (1/3), x)
+            if method == 'hypot':
+                y = self._to_float(args[1]) if len(args) > 1 else 0.0
+                return math.hypot(x, y)
+            if method == 'floor':  return math.floor(x)
+            if method == 'ceil':   return math.ceil(x)
+            if method == 'abs':    return abs(x)
+            if method == 'PI':     return math.pi
+            if method == 'E':      return math.e
+            return None
+
+        # Array class methods  Array.new(n, val)
+        if recv_val == 'Array' and method == 'new':
+            args = [self._eval_node(a) for a in node.args]
+            n = int(args[0]) if args else 0
+            val = args[1] if len(args) > 1 else None
+            return [val] * n
+
+        # nil receiver  nil.to_i / nil.to_f / nil.to_s / nil.to_a
+        if recv_val is None:
+            if method == 'to_i':   return 0
+            if method == 'to_f':   return 0.0
+            if method == 'to_s':   return ''
+            if method == 'to_a':   return []
+            if method in ('nil?', 'null?'): return True
+            return None
+
+        # Lambda / Proc call
+        if isinstance(recv_val, _Lambda) and method == 'call':
+            args = [self._eval_node(a) for a in node.args]
+            saved = dict(self._variables)
+            self._variables.update(recv_val.closure)
+            for i, param in enumerate(recv_val.params):
+                self._variables[param] = args[i] if i < len(args) else None
+            result = None
+            try:
+                result = self._eval_body_last(recv_val.body)
+            except _ReturnSignal as r:
+                result = r.value
+            self._variables = saved
+            return result
+
         # N.times do ... end
         if method == 'times':
             n = int(recv_val) if isinstance(recv_val, (int, float)) else 0
@@ -594,9 +674,9 @@ class Evaluator:
         if method in ('abs',):
             return abs(recv_val) if isinstance(recv_val, (int, float)) else recv_val
         if method == 'floor':
-            import math; return math.floor(recv_val) if isinstance(recv_val, (int, float)) else recv_val
+            return math.floor(recv_val) if isinstance(recv_val, (int, float)) else recv_val
         if method == 'ceil':
-            import math; return math.ceil(recv_val) if isinstance(recv_val, (int, float)) else recv_val
+            return math.ceil(recv_val) if isinstance(recv_val, (int, float)) else recv_val
         if method == 'round':
             return round(recv_val) if isinstance(recv_val, (int, float)) else recv_val
         if method in ('even?',):
@@ -775,18 +855,41 @@ class Evaluator:
                 if keep:
                     result.append(item if negate else val)
             return result
-        if method == 'reduce' and isinstance(recv_val, list) and node.block:
+        if method in ('reduce', 'inject') and isinstance(recv_val, list):
             if not recv_val:
                 return None
-            acc = recv_val[0]
-            for item in recv_val[1:]:
-                if len(node.block.params) >= 2:
-                    self._variables[node.block.params[0]] = acc
-                    self._variables[node.block.params[1]] = item
-                acc = None
-                for s in node.block.body:
-                    acc = self._eval_node(s)
-            return acc
+            args = [self._eval_node(a) for a in node.args]
+            # Determine if there's an initial accumulator value and/or a symbol op
+            # Forms: inject(:+), inject(0, :+), inject(0) {|a,b| ...}, inject {|a,b| ...}
+            sym_op = None
+            initial = None
+            for a in args:
+                if isinstance(a, str) and a in ('+', '-', '*', '/', '%'):
+                    sym_op = a
+                elif isinstance(a, (int, float)):
+                    initial = a
+            if node.block:
+                acc = initial if initial is not None else recv_val[0]
+                items = recv_val if initial is not None else recv_val[1:]
+                for item in items:
+                    if len(node.block.params) >= 2:
+                        self._variables[node.block.params[0]] = acc
+                        self._variables[node.block.params[1]] = item
+                    acc = None
+                    for s in node.block.body:
+                        acc = self._eval_node(s)
+                return acc
+            elif sym_op:
+                _ops = {'+': lambda a, b: a + b, '-': lambda a, b: a - b,
+                        '*': lambda a, b: a * b, '/': lambda a, b: a / b if b else 0,
+                        '%': lambda a, b: a % b if b else 0}
+                op_fn = _ops[sym_op]
+                acc = initial if initial is not None else recv_val[0]
+                items = recv_val if initial is not None else recv_val[1:]
+                for item in items:
+                    acc = op_fn(acc, item)
+                return acc
+            return None
         if method == 'each_slice' and isinstance(recv_val, list) and node.block:
             args = [self._eval_node(a) for a in node.args]
             n = int(args[0]) if args else 1
@@ -833,6 +936,48 @@ class Evaluator:
             args = [self._eval_node(a) for a in node.args]
             idx = int(args[0]) if args else 0
             return recv_val[idx % len(recv_val)] if recv_val else None
+
+        # Type checking
+        if method in ('is_a?', 'kind_of?', 'instance_of?'):
+            args = [self._eval_node(a) for a in node.args]
+            type_name = str(args[0]) if args else ''
+            _type_map = {
+                'Integer': int, 'Fixnum': int, 'Bignum': int,
+                'Float': float, 'Numeric': (int, float),
+                'String': str, 'Array': list, 'Hash': dict,
+                'NilClass': type(None), 'TrueClass': bool, 'FalseClass': bool,
+            }
+            t = _type_map.get(type_name)
+            if t is not None:
+                return isinstance(recv_val, t)
+            return False
+
+        if method == 'respond_to?':
+            args = [self._eval_node(a) for a in node.args]
+            meth_name = str(args[0]) if args else ''
+            if isinstance(recv_val, list):
+                return meth_name in ('each', 'map', 'select', 'reject', 'include?',
+                                     'length', 'size', 'first', 'last', 'push', 'pop',
+                                     'sort', 'reverse', 'flatten', 'compact', 'uniq',
+                                     'min', 'max', 'sum', 'reduce', 'inject')
+            if isinstance(recv_val, (int, float)):
+                return meth_name in ('to_i', 'to_f', 'to_s', 'abs', 'floor', 'ceil',
+                                     'round', 'times', 'upto', 'downto',
+                                     'even?', 'odd?', 'zero?', 'positive?', 'negative?')
+            if isinstance(recv_val, str):
+                return meth_name in ('to_s', 'to_i', 'to_f', 'upcase', 'downcase',
+                                     'length', 'size', 'split', 'reverse', 'include?')
+            return False
+
+        if method in ('class',):
+            if isinstance(recv_val, bool): return 'TrueClass' if recv_val else 'FalseClass'
+            if isinstance(recv_val, int): return 'Integer'
+            if isinstance(recv_val, float): return 'Float'
+            if isinstance(recv_val, str): return 'String'
+            if isinstance(recv_val, list): return 'Array'
+            if isinstance(recv_val, dict): return 'Hash'
+            if recv_val is None: return 'NilClass'
+            return 'Object'
 
         return None
 
@@ -1742,6 +1887,54 @@ class Evaluator:
         if key:
             return self._store.get(key, default)
         return default
+
+    # ── Lambda / Proc ─────────────────────────────────────────────────────
+
+    def _call_lambda(self, node: MethodCall) -> '_Lambda | None':
+        if node.block:
+            return _Lambda(
+                params=list(node.block.params),
+                body=list(node.block.body),
+                closure=dict(self._variables),
+            )
+        return None
+
+    # ── Type conversions ──────────────────────────────────────────────────
+
+    def _call_integer_conv(self, node: MethodCall) -> int:
+        args, _ = self._eval_args(node)
+        v = args[0] if args else 0
+        try:
+            return int(float(v))
+        except (TypeError, ValueError):
+            return 0
+
+    def _call_float_conv(self, node: MethodCall) -> float:
+        args, _ = self._eval_args(node)
+        v = args[0] if args else 0
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return 0.0
+
+    def _call_string_conv(self, node: MethodCall) -> str:
+        args, _ = self._eval_args(node)
+        v = args[0] if args else ''
+        return str(v) if v is not None else ''
+
+    # ── Pitch / frequency helpers ─────────────────────────────────────────
+
+    def _call_pitch_to_ratio(self, node: MethodCall) -> float:
+        args, _ = self._eval_args(node)
+        semitones = self._to_float(args[0] if args else 0)
+        return 2 ** (semitones / 12.0)
+
+    def _call_ratio_to_pitch(self, node: MethodCall) -> float:
+        args, _ = self._eval_args(node)
+        ratio = self._to_float(args[0] if args else 1)
+        if ratio <= 0:
+            return 0.0
+        return 12.0 * math.log2(ratio)
 
 
 # ---------------------------------------------------------------------------

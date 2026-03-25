@@ -867,6 +867,192 @@ def test_use_merged_synth_defaults():
     assert abs(events[0].args['amp'] - 0.3) < 0.01
 
 
+# ── Lambda / Proc ─────────────────────────────────────────────────────────
+
+def test_lambda_call():
+    events = synths("f = lambda {|n| n * 2}\nplay f.call(30)")
+    assert abs(events[0].args['note'] - 60.0) < 0.01
+
+
+def test_lambda_do_end():
+    events = synths("f = lambda do |n| n + 4 end\nplay f.call(56)")
+    assert abs(events[0].args['note'] - 60.0) < 0.01
+
+
+def test_proc_call():
+    events = synths("f = proc {|n| n + 10}\nplay f.call(50)")
+    assert abs(events[0].args['note'] - 60.0) < 0.01
+
+
+def test_lambda_dot_paren_syntax():
+    # f.(args) is shorthand for f.call(args)
+    events = synths("f = lambda {|n| n + 10}\nplay f.(50)")
+    assert abs(events[0].args['note'] - 60.0) < 0.01
+
+
+# ── Math module ────────────────────────────────────────────────────────────
+
+def test_math_sqrt():
+    events = synths("play Math.sqrt(3600).to_i")
+    assert abs(events[0].args['note'] - 60.0) < 0.01
+
+
+def test_math_sin():
+    events = synths("play Math.sin(0).to_i")
+    assert abs(events[0].args['note'] - 0.0) < 0.01
+
+
+def test_math_cos():
+    events = synths("play Math.cos(0).to_i")
+    assert abs(events[0].args['note'] - 1.0) < 0.01
+
+
+def test_math_log():
+    events = synths("play (Math.log(1)).to_i")
+    assert abs(events[0].args['note'] - 0.0) < 0.01
+
+
+def test_math_exp():
+    events = synths("play Math.exp(0).to_i")
+    assert abs(events[0].args['note'] - 1.0) < 0.01
+
+
+# ── Integer() / Float() type conversions ──────────────────────────────────
+
+def test_integer_conv():
+    events = synths("play Integer(60.9)")
+    assert abs(events[0].args['note'] - 60.0) < 0.01
+
+
+def test_float_conv():
+    events = synths("x = Float(60)\nplay x")
+    assert abs(events[0].args['note'] - 60.0) < 0.01
+
+
+def test_integer_from_string():
+    events = synths("play Integer('60')")
+    assert abs(events[0].args['note'] - 60.0) < 0.01
+
+
+# ── inject / reduce with symbol and initial value ─────────────────────────
+
+def test_inject_symbol():
+    events = synths("play [10, 20, 30].inject(:+)")
+    assert abs(events[0].args['note'] - 60.0) < 0.01
+
+
+def test_inject_symbol_colon():
+    # :+ should tokenize as a symbol
+    events = synths("play [1, 2, 3].inject(:+)")
+    assert abs(events[0].args['note'] - 6.0) < 0.01
+
+
+def test_inject_with_initial_value():
+    events = synths("play [6, 10, 14, 18, 12].inject(:+)")
+    # 6+10+14+18+12 = 60
+    assert abs(events[0].args['note'] - 60.0) < 0.01
+
+
+def test_inject_block_with_initial():
+    events = synths("play [10, 20].inject(30) {|acc, n| acc + n}")
+    assert abs(events[0].args['note'] - 60.0) < 0.01
+
+
+def test_reduce_alias():
+    events = synths("play [20, 20, 20].reduce(:+)")
+    assert abs(events[0].args['note'] - 60.0) < 0.01
+
+
+# ── Array.new ─────────────────────────────────────────────────────────────
+
+def test_array_new():
+    events = synths("arr = Array.new(3, 20)\nplay arr.sum")
+    assert abs(events[0].args['note'] - 60.0) < 0.01
+
+
+def test_array_new_default_nil():
+    events = ev("arr = Array.new(3)")
+    assert events == []  # just verify it runs
+
+
+# ── pitch_to_ratio / ratio_to_pitch ───────────────────────────────────────
+
+def test_pitch_to_ratio_octave():
+    # 12 semitones = ratio 2.0
+    events = synths("x = pitch_to_ratio(12)\nplay (x * 30).to_i")
+    assert abs(events[0].args['note'] - 60.0) < 0.01
+
+
+def test_ratio_to_pitch_octave():
+    # ratio 2 = 12 semitones
+    events = synths("play ratio_to_pitch(2).to_i")
+    assert abs(events[0].args['note'] - 12.0) < 0.01
+
+
+# ── is_a? / kind_of? / respond_to? ───────────────────────────────────────
+
+def test_is_a_integer():
+    events = synths("x = 60\nplay x if x.is_a?(Integer)")
+    assert abs(events[0].args['note'] - 60.0) < 0.01
+
+
+def test_is_a_float():
+    events = synths("x = 60.0\nplay x if x.is_a?(Float)")
+    assert abs(events[0].args['note'] - 60.0) < 0.01
+
+
+def test_is_a_array():
+    events = synths("x = [60]\nplay x[0] if x.is_a?(Array)")
+    assert abs(events[0].args['note'] - 60.0) < 0.01
+
+
+def test_kind_of():
+    events = synths("play 60 if 60.kind_of?(Integer)")
+    assert abs(events[0].args['note'] - 60.0) < 0.01
+
+
+def test_respond_to_each():
+    events = synths("play 60 if [1].respond_to?(:each)")
+    assert abs(events[0].args['note'] - 60.0) < 0.01
+
+
+# ── nil conversions ───────────────────────────────────────────────────────
+
+def test_nil_to_i():
+    events = synths("x = nil\nplay x.to_i + 60")
+    assert abs(events[0].args['note'] - 60.0) < 0.01
+
+
+def test_nil_to_f():
+    events = synths("x = nil\nplay x.to_f + 60.0")
+    assert abs(events[0].args['note'] - 60.0) < 0.01
+
+
+def test_nil_to_s():
+    events = ev("x = nil\ny = x.to_s")
+    assert events == []  # just verify no crash
+
+
+# ── Operator symbols :+ :- etc. ────────────────────────────────────────────
+
+def test_operator_symbol_tokenize():
+    # :+ should be tokenized as a SYMBOL with value '+'
+    events = synths("play [20, 40].inject(:+)")
+    assert abs(events[0].args['note'] - 60.0) < 0.01
+
+
+def test_operator_symbol_multiply():
+    events = synths("play [2, 30].inject(:*)")
+    assert abs(events[0].args['note'] - 60.0) < 0.01
+
+
+# ── .() call syntax ────────────────────────────────────────────────────────
+
+def test_dot_paren_call():
+    events = synths("f = lambda {|a, b| a + b}\nplay f.(30, 30)")
+    assert abs(events[0].args['note'] - 60.0) < 0.01
+
+
 if __name__ == "__main__":
     import pytest
     pytest.main([__file__, "-v"])
