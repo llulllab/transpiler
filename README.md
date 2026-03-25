@@ -36,6 +36,7 @@ The evaluator is a Python interpreter for the Sonic Pi DSL. It does not execute 
 
 - Python 3.10+
 - SuperCollider (`sclang` + `scsynth`) — only needed to actually render audio, not to transpile
+- [sc3-plugins](https://github.com/supercollider/sc3-plugins/releases) — required for `:piano` synth and `:bitcrusher` FX. Extract to `C:\ProgramData\SuperCollider\Extensions\` (Windows) or `~/.local/share/SuperCollider/Extensions/` (Linux/macOS)
 
 ## Quick Start
 
@@ -101,6 +102,8 @@ python cli.py input.rb output.wav [options]
 |---------|-------|
 | `sleep n` | Advances time cursor |
 | `use_bpm n` / `with_bpm n` | Scales all subsequent sleep values |
+| `beat_duration` | Seconds per beat at current BPM |
+| `bar_duration` | Seconds per bar (4 beats) at current BPM |
 | `density n do...end` | Runs block n times at n× BPM |
 | `at [times] do...end` | Fork execution at time offsets |
 
@@ -120,7 +123,7 @@ python cli.py input.rb output.wav [options]
 | `chord(:C4, :minor7)` | All standard chord types |
 | `scale(:C4, :major, num_octaves: 2)` | All standard scale names |
 | `note(:C4)` / `note(60)` | Note name → MIDI integer |
-| `note_info(:C4)` | Returns note metadata |
+| `note_info(:C4)` | Returns `NoteInfo` object; access via `ni.midi_note`, `ni.freq`, `ni.pitch_class`, `ni.octave` |
 | `midi_notes` | Chromatic scale helper |
 | `spread(hits, total)` | Euclidean / Björklund rhythm |
 | `ring(...)` | Circular list with `.tick` / `.look` |
@@ -162,7 +165,7 @@ These features are intentionally NRT-incompatible and are silently no-ops or app
 |---------|-----------|
 | `cue` / `sync` | No-op (no real-time thread synchronisation) |
 | `live_audio` | No-op |
-| `use_tuning` | Stored but does not alter MIDI note numbers |
+| `use_tuning` | Applies per-semitone cent offsets (`just`, `pythagorean`, `meantone`); affects rendered pitch |
 | `in_thread` parallelism | Simulated sequentially, merged by time |
 
 `live_loop` is unrolled a fixed number of times (see `--iters`).
@@ -175,4 +178,4 @@ python -m pytest tests/ -v
 python -m pytest tests/test_new_features.py -v
 ```
 
-422 tests covering tokenizer, parser, evaluator, music theory, and codegen.
+423 tests covering tokenizer, parser, evaluator, music theory, and codegen.
