@@ -37,8 +37,14 @@ def test_scd_contains_s_new():
     assert "/s_new" in scd
 
 
-def test_scd_contains_n_free():
+def test_scd_no_n_free_for_synth():
+    # Sonic Pi synths use doneAction:2 (self-freeing envelope) — no /n_free needed
     scd = make_scd("play 60")
+    assert "/n_free" not in scd
+
+def test_scd_n_free_for_fx():
+    # FX nodes do not self-free — codegen must send /n_free at fx_close time
+    scd = make_scd("with_fx :reverb do; play 60; end")
     assert "/n_free" in scd
 
 

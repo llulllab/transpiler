@@ -145,7 +145,6 @@ class SCNRTCodegen:
 
     def _render_synth(self, evt: SoundEvent) -> list[str]:
         t = evt.time
-        dur = evt.duration()
         nid = evt.node_id
 
         args = dict(evt.args)
@@ -156,9 +155,10 @@ class SCNRTCodegen:
         msg = self._s_new_msg(evt.synth_name, nid, 0, 0, args)
         s = f'score = score.add([{t:.6f}, {msg}]);'
 
-        free_t = t + dur
-        f = f'score = score.add([{free_t:.6f}, ["/n_free", {nid}]]);'
-        return [s, f]
+        # All Sonic Pi synths use EnvGen with doneAction:2 — they free themselves
+        # when their envelope finishes. Sending /n_free would cause "Node not found"
+        # errors when the node has already self-terminated.
+        return [s]
 
     def _render_sample(self, evt: SoundEvent) -> list[str]:
         t = evt.time
