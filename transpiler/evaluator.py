@@ -27,6 +27,7 @@ from .music_theory import (
     note_to_midi, chord as mk_chord, scale as mk_scale,
     chord_invert as mk_chord_invert, chord_degree as mk_chord_degree,
     degree as mk_degree, note_range as mk_note_range,
+    CHORD_INTERVALS, SCALE_INTERVALS,
 )
 from .sample_map import SampleResolver
 
@@ -253,20 +254,25 @@ class Evaluator:
 
     # Built-in no-arg calls that should execute even when parsed as Identifier
     _BARE_BUILTINS = {'stop', 'coin_flip', 'reset_tick', 'tick', 'look',
-                      'beat', 'current_beat', 'free_all'}
+                      'beat', 'current_beat', 'current_bpm', 'current_synth',
+                      'current_synth_name', 'current_time', 'current_time_in_beats',
+                      'chord_names', 'scale_names', 'free_all'}
+
+    def _eval_body_last(self, stmts: list) -> Any:
+        """Evaluate body statements, returning the last expression's value."""
+        result = None
+        for stmt in stmts:
+            result = self._eval_node(stmt)
+        return result
 
     def _eval_Identifier(self, n: Identifier) -> Any:
         val = self._variables.get(n.name)
         if val is None and n.name in self._user_funcs:
-            # Bare identifier that matches a user function → call with no args
-            func = self._user_funcs[n.name]
-            old_vars = dict(self._variables)
-            try:
-                self._eval_body(func.body)
-            except _ReturnSignal:
-                pass
-            self._variables = old_vars
-            return None
+            # Bare identifier matching a user function → call with no args
+            return self._call_user_func(
+                self._user_funcs[n.name],
+                MethodCall(None, n.name, [], {}, None),
+            )
         if val is None and n.name in self._BARE_BUILTINS:
             return self._eval_MethodCall(MethodCall(None, n.name, [], {}, None))
         return val
@@ -479,6 +485,20 @@ class Evaluator:
             # Random seed
             'use_random_seed':     self._call_use_random_seed,
             'with_random_seed':    self._call_with_random_seed,
+            # State getters
+            'current_bpm':         self._call_current_bpm,
+            'current_synth':       self._call_current_synth,
+            'current_synth_name':  self._call_current_synth,
+            'current_time':        self._call_beat,
+            'current_time_in_beats': self._call_beat,
+            # Music info
+            'note_info':           self._call_note_info,
+            'chord_names':         self._call_chord_names,
+            'scale_names':         self._call_scale_names,
+            'sample_names':        self._call_sample_names,
+            # Merged synth defaults (merge with existing, don't replace)
+            'use_merged_synth_defaults':  self._call_use_synth_defaults,
+            'with_merged_synth_defaults': self._call_with_synth_defaults,
             # Cent tuning
             'use_cent_tuning':     self._call_use_cent_tuning,
             'with_cent_tuning':    self._call_with_cent_tuning,
@@ -1276,11 +1296,23 @@ class Evaluator:
     def _call_user_func(self, func: FuncDef, node: MethodCall) -> Any:
         args, _ = self._eval_args(node)
         old_vars = dict(self._variables)
+        positional = 0  # count of positional args consumed
         for i, param in enumerate(func.params):
-            self._variables[param] = args[i] if i < len(args) else None
+            if param.startswith('*'):
+                # Splat: collect all remaining args as list
+                self._variables[param[1:]] = list(args[i:])
+                positional = len(func.params)  # consumed all
+                break
+            if positional < len(args):
+                self._variables[param] = args[positional]
+            elif param in func.defaults:
+                self._variables[param] = self._eval_node(func.defaults[param])
+            else:
+                self._variables[param] = None
+            positional += 1
         result = None
         try:
-            self._eval_body(func.body)
+            result = self._eval_body_last(func.body)
         except _ReturnSignal as r:
             result = r.value
         self._variables = old_vars
@@ -1655,6 +1687,44 @@ class Evaluator:
         key = str(args[0]).lstrip(':') if args else '_default'
         val = int(args[1]) if len(args) > 1 else 0
         self._variables[f'__tick_{key}'] = val
+
+    # ── State getters ─────────────────────────────────────────────────────
+
+    def _call_current_bpm(self, node: MethodCall) -> float:
+        return self._bpm
+
+    def _call_current_synth(self, node: MethodCall) -> str:
+        return self._current_synth
+
+    # ── Music info ────────────────────────────────────────────────────────
+
+    def _call_note_info(self, node: MethodCall) -> dict:
+        args, _ = self._eval_args(node)
+        n = args[0] if args else 'C4'
+        midi = note_to_midi(n)
+        if midi is None:
+            return {}
+        octave = int(midi) // 12 - 1
+        semitone = int(midi) % 12
+        pitch_classes = ['C', 'Cs', 'D', 'Eb', 'E', 'F', 'Fs', 'G', 'Ab', 'A', 'Bb', 'B']
+        return {
+            'midi_note':   int(midi),
+            'note_name':   str(n).lstrip(':'),
+            'pitch_class': pitch_classes[semitone],
+            'octave':      octave,
+            'freq':        round(440.0 * (2.0 ** ((midi - 69.0) / 12.0)), 3),
+        }
+
+    def _call_chord_names(self, node: MethodCall) -> list:
+        return list(CHORD_INTERVALS.keys())
+
+    def _call_scale_names(self, node: MethodCall) -> list:
+        return list(SCALE_INTERVALS.keys())
+
+    def _call_sample_names(self, node: MethodCall) -> list:
+        args, _ = self._eval_args(node)
+        group = str(args[0]).lstrip(':') if args else ''
+        return self._sample_resolver.list_group(group) if group else []
 
     # ── Key-value store ───────────────────────────────────────────────────
 

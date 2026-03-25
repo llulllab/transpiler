@@ -680,20 +680,33 @@ class Parser:
         self.expect(TT.DEF)
         name = self.expect(TT.IDENT).value
         params: list[str] = []
+        defaults: dict = {}
         if self.match(TT.LPAREN):
             self.advance()
             while not self.match(TT.RPAREN, TT.EOF):
+                splat = False
+                if self.match(TT.STAR):
+                    self.advance()
+                    splat = True
                 if self.match(TT.IDENT):
-                    params.append(self.advance().value)
-                elif self.match(TT.COMMA):
+                    pname = self.advance().value
+                    if splat:
+                        params.append('*' + pname)
+                    else:
+                        params.append(pname)
+                        # optional default value:  param = expr
+                        if self.match(TT.ASSIGN):
+                            self.advance()
+                            defaults[pname] = self._parse_arg_val()
+                if self.match(TT.COMMA):
                     self.advance()
-                else:
-                    self.advance()
+                elif not self.match(TT.RPAREN):
+                    self.advance()  # skip unexpected
             self.expect(TT.RPAREN)
         self.skip_newlines()
         body = self._parse_body_until(TT.END)
         self.expect(TT.END)
-        return FuncDef(name, params, body)
+        return FuncDef(name, params, body, defaults)
 
 
 # ---------------------------------------------------------------------------

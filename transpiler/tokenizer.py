@@ -333,6 +333,36 @@ def tokenize(source: str) -> list[Token]:
                 add(TT.IDENT, word)
             continue
 
+        # ── %w[...] word array  /  %i[...] symbol array ─────────────────
+        if ch == '%' and pos + 1 < length and source[pos + 1] in 'wWiI':
+            sym_mode = source[pos + 1] in 'iI'
+            opener = source[pos + 2] if pos + 2 < length else '['
+            closer = {'{': '}', '(': ')', '[': ']', '<': '>'}.get(opener, opener)
+            pos += 3  # skip  %w[
+            words: list[str] = []
+            buf: list[str] = []
+            while pos < length and source[pos] != closer:
+                if source[pos] in ' \t\n':
+                    if buf:
+                        words.append(''.join(buf))
+                        buf = []
+                    if source[pos] == '\n':
+                        line += 1
+                else:
+                    buf.append(source[pos])
+                pos += 1
+            if buf:
+                words.append(''.join(buf))
+            if pos < length:
+                pos += 1  # skip closer
+            add(TT.LBRACKET, '[')
+            for wi, word in enumerate(words):
+                if wi > 0:
+                    add(TT.COMMA, ',')
+                add(TT.SYMBOL if sym_mode else TT.STRING, word)
+            add(TT.RBRACKET, ']')
+            continue
+
         # ── Single-char tokens ───────────────────────────────────────────
         SINGLE = {
             '=': TT.ASSIGN,

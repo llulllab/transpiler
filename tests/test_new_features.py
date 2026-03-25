@@ -740,6 +740,133 @@ def test_reset_tick():
     assert abs(notes[2] - 60.0) < 0.01  # reset → back to index 0
 
 
+# ── Implicit return from def ──────────────────────────────────────────────
+
+def test_def_implicit_return():
+    events = synths("def my_note\n  60\nend\nplay my_note")
+    assert len(events) == 1
+    assert abs(events[0].args['note'] - 60.0) < 0.01
+
+
+def test_def_implicit_return_expression():
+    events = synths("def octave_up(n)\n  n + 12\nend\nplay octave_up(60)")
+    assert abs(events[0].args['note'] - 72.0) < 0.01
+
+
+def test_def_explicit_return_still_works():
+    events = synths("def foo\n  return 64\n  72\nend\nplay foo")
+    assert abs(events[0].args['note'] - 64.0) < 0.01
+
+
+# ── Default parameters ────────────────────────────────────────────────────
+
+def test_def_default_param_used():
+    events = synths("def foo(n=60)\n  play n\nend\nfoo")
+    assert abs(events[0].args['note'] - 60.0) < 0.01
+
+
+def test_def_default_param_overridden():
+    events = synths("def foo(n=60)\n  play n\nend\nfoo(72)")
+    assert abs(events[0].args['note'] - 72.0) < 0.01
+
+
+def test_def_multiple_defaults():
+    events = synths("def chord_play(root=60, interval=4)\n  play root\n  play root+interval\nend\nchord_play")
+    notes = sorted(e.args['note'] for e in events)
+    assert notes == [60.0, 64.0]
+
+
+# ── Splat parameters ──────────────────────────────────────────────────────
+
+def test_splat_param_collects_all():
+    events = synths("def play_all(*ns)\n  ns.each {|n| play n}\nend\nplay_all(60, 64, 67)")
+    assert len(events) == 3
+    notes = sorted(e.args['note'] for e in events)
+    assert notes == [60.0, 64.0, 67.0]
+
+
+def test_splat_param_empty():
+    events = synths("def play_all(*ns)\n  ns.each {|n| play n}\nend\nplay_all")
+    assert len(events) == 0
+
+
+# ── %w[] and %i[] arrays ──────────────────────────────────────────────────
+
+def test_percent_w_array():
+    events = synths("x = %w[foo bar baz]\nplay x.size")
+    assert abs(events[0].args['note'] - 3.0) < 0.01
+
+
+def test_percent_i_array():
+    # %i[] creates symbol array
+    events = ev("x = %i[foo bar]\nassert = x.size")
+    assert events == []  # no sound, just verify parse
+
+
+def test_percent_w_multiline():
+    events = synths("x = %w[\n  a b\n  c\n]\nplay x.size")
+    assert abs(events[0].args['note'] - 3.0) < 0.01
+
+
+# ── current_bpm / current_synth ───────────────────────────────────────────
+
+def test_current_bpm():
+    events = synths("use_bpm 120\nplay current_bpm")
+    assert abs(events[0].args['note'] - 120.0) < 0.01
+
+
+def test_current_bpm_default():
+    events = synths("play current_bpm")
+    assert abs(events[0].args['note'] - 60.0) < 0.01
+
+
+def test_current_synth_returns_string():
+    events = ev("x = current_synth")
+    assert events == []  # no sound
+
+
+# ── note_info ─────────────────────────────────────────────────────────────
+
+def test_note_info_midi():
+    events = synths("x = note_info(:C4)\nplay x[:midi_note]")
+    assert abs(events[0].args['note'] - 60.0) < 0.01
+
+
+def test_note_info_octave():
+    events = ev("x = note_info(:C4)\nassert = x[:octave]")
+    assert events == []  # just verify it runs
+
+
+# ── chord_names / scale_names / sample_names ─────────────────────────────
+
+def test_chord_names_not_empty():
+    events = ev("x = chord_names")
+    assert events == []  # no sound
+
+
+def test_scale_names_not_empty():
+    events = ev("x = scale_names")
+    assert events == []
+
+
+def test_sample_names_ambi():
+    events = ev("x = sample_names(:ambi)")
+    assert events == []
+
+
+# ── with_merged_synth_defaults ────────────────────────────────────────────
+
+def test_with_merged_synth_defaults():
+    events = synths("with_merged_synth_defaults amp: 0.5 do\n  play 60\nend")
+    assert len(events) == 1
+    assert abs(events[0].args['amp'] - 0.5) < 0.01
+
+
+def test_use_merged_synth_defaults():
+    events = synths("use_merged_synth_defaults amp: 0.3\nplay 60")
+    assert abs(events[0].args['amp'] - 0.3) < 0.01
+
+
 if __name__ == "__main__":
     import pytest
     pytest.main([__file__, "-v"])

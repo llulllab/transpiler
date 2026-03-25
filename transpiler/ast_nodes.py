@@ -134,8 +134,9 @@ class CaseStmt(Node):
 @dataclass
 class FuncDef(Node):
     name: str
-    params: list[str]
+    params: list[str]       # plain names; splat params prefixed with '*'
     body: list[Node]
+    defaults: dict = field(default_factory=dict)  # param_name → Node
 
 @dataclass
 class MultiAssign(Node):

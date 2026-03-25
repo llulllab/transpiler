@@ -156,6 +156,11 @@ class SampleResolver:
                     return str(p)
         return None
 
+    def list_group(self, group: str) -> list[str]:
+        """Return all sample names that start with the given group prefix."""
+        prefix = group.lower().rstrip('_') + '_'
+        return [s for s in BUILTIN_SAMPLES if s.startswith(prefix)]
+
     def is_builtin(self, name: str) -> bool:
         """Return True if the name is a known built-in sample."""
         return name.lstrip(':').lower() in BUILTIN_SAMPLES
