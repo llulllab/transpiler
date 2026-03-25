@@ -66,6 +66,26 @@ class SoundEvent:
         return a + d + s + r
 
 
+class _NoteInfo:
+    """Object returned by note_info() — supports both dot and [] access."""
+    __slots__ = ('midi_note', 'note_name', 'pitch_class', 'octave', 'freq')
+
+    def __init__(self, midi_note, note_name, pitch_class, octave, freq):
+        self.midi_note   = midi_note
+        self.note_name   = note_name
+        self.pitch_class = pitch_class
+        self.octave      = octave
+        self.freq        = freq
+
+    def __getitem__(self, key):
+        key = str(key).lstrip(':')
+        return getattr(self, key, None)
+
+    def __repr__(self):
+        return (f'<NoteInfo midi_note={self.midi_note} note={self.note_name} '
+                f'pitch_class={self.pitch_class} octave={self.octave} freq={self.freq}>')
+
+
 @dataclass
 class _Lambda:
     """Callable object created by lambda or proc."""
@@ -899,6 +919,13 @@ class Evaluator:
             if method == 'to_a':   return []
             if method in ('nil?', 'null?'): return True
             return None
+
+        # NoteInfo dot/[] access
+        if isinstance(recv_val, _NoteInfo):
+            if method == '[]':
+                key = self._eval_node(node.args[0]) if node.args else None
+                return recv_val[key]
+            return getattr(recv_val, method, None)
 
         # Lambda / Proc call
         if isinstance(recv_val, _Lambda):
@@ -3313,22 +3340,22 @@ class Evaluator:
 
     # ── Music info ────────────────────────────────────────────────────────
 
-    def _call_note_info(self, node: MethodCall) -> dict:
+    def _call_note_info(self, node: MethodCall) -> '_NoteInfo':
         args, _ = self._eval_args(node)
         n = args[0] if args else 'C4'
         midi = note_to_midi(n)
         if midi is None:
-            return {}
+            return _NoteInfo(0, str(n), 'C', 0, 0.0)
         octave = int(midi) // 12 - 1
         semitone = int(midi) % 12
         pitch_classes = ['C', 'Cs', 'D', 'Eb', 'E', 'F', 'Fs', 'G', 'Ab', 'A', 'Bb', 'B']
-        return {
-            'midi_note':   int(midi),
-            'note_name':   str(n).lstrip(':'),
-            'pitch_class': pitch_classes[semitone],
-            'octave':      octave,
-            'freq':        round(440.0 * (2.0 ** ((midi - 69.0) / 12.0)), 3),
-        }
+        return _NoteInfo(
+            midi_note   = int(midi),
+            note_name   = str(n).lstrip(':'),
+            pitch_class = pitch_classes[semitone],
+            octave      = octave,
+            freq        = round(440.0 * (2.0 ** ((midi - 69.0) / 12.0)), 3),
+        )
 
     def _call_chord_names(self, node: MethodCall) -> list:
         return list(CHORD_INTERVALS.keys())
