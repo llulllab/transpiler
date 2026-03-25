@@ -239,7 +239,7 @@ class Parser:
 
     def _parse_additive(self) -> Node:
         left = self._parse_multiplicative()
-        while self.match(TT.PLUS, TT.MINUS):
+        while self.match(TT.PLUS, TT.MINUS, TT.LSHIFT):
             op = self.advance().value
             right = self._parse_multiplicative()
             left = BinOp(op, left, right)
@@ -287,12 +287,17 @@ class Parser:
                     self.expect(TT.RPAREN)
                     block = self._parse_block_opt()
                     node = MethodCall(node, 'call', args, kwargs, block)
-                elif not self.match(TT.IDENT):
-                    break
-                else:
+                elif self.cur.type == TT.IDENT or (
+                        self.cur.value is not None and self.cur.type not in (
+                            TT.NEWLINE, TT.EOF, TT.LBRACE, TT.LPAREN,
+                            TT.RBRACE, TT.RPAREN, TT.LBRACKET, TT.RBRACKET,
+                            TT.COMMA, TT.ASSIGN, TT.PIPE,
+                        )):
                     method = self.advance().value
                     args, kwargs, block = self._parse_call_tail()
                     node = MethodCall(node, method, args, kwargs, block)
+                else:
+                    break
 
             # [index]
             elif self.match(TT.LBRACKET):
@@ -430,7 +435,7 @@ class Parser:
                       TT.PLUS, TT.STAR, TT.SLASH, TT.PERCENT,
                       TT.EQ, TT.NEQ, TT.LT, TT.GT, TT.LTE, TT.GTE,
                       TT.AND, TT.OR, TT.STARSTAR, TT.PIPE,
-                      TT.DOTDOT, TT.COMMA,
+                      TT.DOTDOT, TT.COMMA, TT.LSHIFT,
                       TT.AMPER_AMPER, TT.PIPE_PIPE, TT.QUESTION, TT.COLON):
             return False
         if t.type == TT.KWARG:

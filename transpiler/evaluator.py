@@ -264,7 +264,8 @@ class Evaluator:
     _BARE_BUILTINS = {'stop', 'coin_flip', 'reset_tick', 'tick', 'look',
                       'beat', 'current_beat', 'current_bpm', 'current_synth',
                       'current_synth_name', 'current_time', 'current_time_in_beats',
-                      'chord_names', 'scale_names', 'free_all'}
+                      'chord_names', 'scale_names', 'sample_names', 'synth_names',
+                      'free_all'}
 
     def _eval_body_last(self, stmts: list) -> Any:
         """Evaluate body statements, returning the last expression's value."""
@@ -321,7 +322,10 @@ class Evaluator:
         l = self._eval_node(n.left)
         r = self._eval_node(n.right)
         try:
-            if n.op == '+':  return l + r
+            if n.op == '+':
+                if isinstance(l, list) and isinstance(r, list):
+                    return l + r
+                return l + r
             if n.op == '-':  return l - r
             if n.op == '*':  return l * r
             if n.op == '/':  return l / r if r else 0
@@ -335,6 +339,13 @@ class Evaluator:
             if n.op == '>=': return l >= r
             if n.op == 'and': return l and r
             if n.op == 'or':  return l or r
+            if n.op == '<<':
+                if isinstance(l, list):
+                    l.append(r)
+                    return l
+                if isinstance(l, int) and isinstance(r, int):
+                    return l << r
+                return l
         except Exception:
             pass
         return None
@@ -537,6 +548,17 @@ class Evaluator:
             # Pitch / frequency helpers
             'pitch_to_ratio':      self._call_pitch_to_ratio,
             'ratio_to_pitch':      self._call_ratio_to_pitch,
+            # Tuning
+            'use_tuning':          self._call_noop,
+            'with_tuning':         self._call_with_block_noop,
+            # Synth info
+            'synth_names':         self._call_synth_names,
+            # Node control (noops for static analysis)
+            'control':             self._call_noop,
+            'live_audio':          self._call_noop,
+            'kill':                self._call_noop,
+            'with_arg_bpm_scaling': self._call_with_block_noop,
+            'use_arg_bpm_scaling': self._call_noop,
             # Noops
             'load_sample':         self._call_noop,
             'load_samples':        self._call_noop,
@@ -607,10 +629,17 @@ class Evaluator:
             if method == 'E':      return math.e
             return None
 
-        # Array class methods  Array.new(n, val)
+        # Array class methods  Array.new(n, val) / Array.new(n) { |i| ... }
         if recv_val == 'Array' and method == 'new':
             args = [self._eval_node(a) for a in node.args]
             n = int(args[0]) if args else 0
+            if node.block:
+                result = []
+                for i in range(n):
+                    if node.block.params:
+                        self._variables[node.block.params[0]] = i
+                    result.append(self._eval_body_last(node.block.body))
+                return result
             val = args[1] if len(args) > 1 else None
             return [val] * n
 
@@ -978,6 +1007,542 @@ class Evaluator:
             if isinstance(recv_val, dict): return 'Hash'
             if recv_val is None: return 'NilClass'
             return 'Object'
+
+        # ── tap / then / yield_self ───────────────────────────────────────
+        if method == 'tap':
+            if node.block:
+                if node.block.params:
+                    self._variables[node.block.params[0]] = recv_val
+                self._eval_body(node.block.body)
+            return recv_val
+
+        if method in ('then', 'yield_self'):
+            if node.block:
+                if node.block.params:
+                    self._variables[node.block.params[0]] = recv_val
+                return self._eval_body_last(node.block.body)
+            return recv_val
+
+        if method in ('freeze', 'frozen?', 'dup', 'clone', 'itself'):
+            return recv_val
+
+        # ── Additional array methods ──────────────────────────────────────
+        if isinstance(recv_val, list):
+            if method in ('flat_map', 'collect_concat') and node.block:
+                result = []
+                for item in recv_val:
+                    if node.block.params:
+                        self._variables[node.block.params[0]] = item
+                    val = self._eval_body_last(node.block.body)
+                    if isinstance(val, list):
+                        result.extend(val)
+                    elif val is not None:
+                        result.append(val)
+                return result
+
+            if method in ('any?',):
+                if node.block:
+                    for item in recv_val:
+                        if node.block.params:
+                            self._variables[node.block.params[0]] = item
+                        if self._eval_body_last(node.block.body):
+                            return True
+                    return False
+                return bool(recv_val)
+
+            if method in ('all?',):
+                if node.block:
+                    for item in recv_val:
+                        if node.block.params:
+                            self._variables[node.block.params[0]] = item
+                        if not self._eval_body_last(node.block.body):
+                            return False
+                    return True
+                return all(recv_val)
+
+            if method in ('none?',):
+                if node.block:
+                    for item in recv_val:
+                        if node.block.params:
+                            self._variables[node.block.params[0]] = item
+                        if self._eval_body_last(node.block.body):
+                            return False
+                    return True
+                return not any(recv_val)
+
+            if method == 'join':
+                args = [self._eval_node(a) for a in node.args]
+                sep = str(args[0]) if args else ''
+                return sep.join(str(x) for x in recv_val)
+
+            if method in ('push', 'append'):
+                args = [self._eval_node(a) for a in node.args]
+                for a in args:
+                    recv_val.append(a)
+                return recv_val
+
+            if method == 'pop':
+                return recv_val.pop() if recv_val else None
+
+            if method == 'shift':
+                return recv_val.pop(0) if recv_val else None
+
+            if method == 'unshift':
+                args = [self._eval_node(a) for a in node.args]
+                for a in reversed(args):
+                    recv_val.insert(0, a)
+                return recv_val
+
+            if method == 'concat':
+                args = [self._eval_node(a) for a in node.args]
+                for a in args:
+                    if isinstance(a, list):
+                        recv_val.extend(a)
+                return recv_val
+
+            if method in ('index', 'find_index'):
+                args = [self._eval_node(a) for a in node.args]
+                if args:
+                    try:
+                        return recv_val.index(args[0])
+                    except ValueError:
+                        return None
+                if node.block:
+                    for i, item in enumerate(recv_val):
+                        if node.block.params:
+                            self._variables[node.block.params[0]] = item
+                        if self._eval_body_last(node.block.body):
+                            return i
+                return None
+
+            if method == 'rindex':
+                args = [self._eval_node(a) for a in node.args]
+                if args:
+                    for i in range(len(recv_val) - 1, -1, -1):
+                        if recv_val[i] == args[0]:
+                            return i
+                return None
+
+            if method == 'min_by' and node.block:
+                if not recv_val:
+                    return None
+                def _key_min(item):
+                    if node.block.params:
+                        self._variables[node.block.params[0]] = item
+                    v = self._eval_body_last(node.block.body)
+                    return v if v is not None else 0
+                return min(recv_val, key=_key_min)
+
+            if method == 'max_by' and node.block:
+                if not recv_val:
+                    return None
+                def _key_max(item):
+                    if node.block.params:
+                        self._variables[node.block.params[0]] = item
+                    v = self._eval_body_last(node.block.body)
+                    return v if v is not None else 0
+                return max(recv_val, key=_key_max)
+
+            if method == 'each_with_object' and node.block:
+                args = [self._eval_node(a) for a in node.args]
+                acc = args[0] if args else []
+                for item in recv_val:
+                    params = node.block.params
+                    if len(params) >= 2:
+                        self._variables[params[0]] = item
+                        self._variables[params[1]] = acc
+                    elif params:
+                        self._variables[params[0]] = [item, acc]
+                    self._eval_body(node.block.body)
+                return acc
+
+            if method in ('delete_if', 'reject!') and node.block:
+                to_remove = []
+                for item in recv_val:
+                    if node.block.params:
+                        self._variables[node.block.params[0]] = item
+                    if self._eval_body_last(node.block.body):
+                        to_remove.append(item)
+                for item in to_remove:
+                    recv_val.remove(item)
+                return recv_val
+
+            if method in ('map!', 'collect!') and node.block:
+                for i, item in enumerate(recv_val):
+                    if node.block.params:
+                        self._variables[node.block.params[0]] = item
+                    recv_val[i] = self._eval_body_last(node.block.body)
+                return recv_val
+
+            if method == 'delete':
+                args = [self._eval_node(a) for a in node.args]
+                target = args[0] if args else None
+                found = None
+                while target in recv_val:
+                    recv_val.remove(target)
+                    found = target
+                return found
+
+            if method == 'insert':
+                args = [self._eval_node(a) for a in node.args]
+                idx = int(args[0]) if args else 0
+                vals = args[1:]
+                for i, v in enumerate(vals):
+                    recv_val.insert(idx + i, v)
+                return recv_val
+
+            if method == 'fill':
+                args = [self._eval_node(a) for a in node.args]
+                val = args[0] if args else None
+                for i in range(len(recv_val)):
+                    recv_val[i] = val
+                return recv_val
+
+            if method == 'product':
+                args = [self._eval_node(a) for a in node.args]
+                other = args[0] if args and isinstance(args[0], list) else []
+                return [[a, b] for a in recv_val for b in other]
+
+            if method == 'combination':
+                args = [self._eval_node(a) for a in node.args]
+                import itertools
+                n = int(args[0]) if args else 2
+                combos = list(itertools.combinations(recv_val, n))
+                if node.block:
+                    for combo in combos:
+                        if node.block.params:
+                            self._variables[node.block.params[0]] = list(combo)
+                        self._eval_body(node.block.body)
+                    return None
+                return [list(c) for c in combos]
+
+            if method == 'permutation':
+                args = [self._eval_node(a) for a in node.args]
+                import itertools
+                n = int(args[0]) if args else len(recv_val)
+                perms = list(itertools.permutations(recv_val, n))
+                if node.block:
+                    for perm in perms:
+                        if node.block.params:
+                            self._variables[node.block.params[0]] = list(perm)
+                        self._eval_body(node.block.body)
+                    return None
+                return [list(p) for p in perms]
+
+            if method == 'tally':
+                result = {}
+                for item in recv_val:
+                    key = str(item)
+                    result[key] = result.get(key, 0) + 1
+                return result
+
+            if method == 'group_by' and node.block:
+                result = {}
+                for item in recv_val:
+                    if node.block.params:
+                        self._variables[node.block.params[0]] = item
+                    key = self._eval_body_last(node.block.body)
+                    key_s = str(key)
+                    if key_s not in result:
+                        result[key_s] = []
+                    result[key_s].append(item)
+                return result
+
+            if method in ('empty?',):
+                return len(recv_val) == 0
+
+            if method == 'to_s':
+                return '[' + ', '.join(str(x) for x in recv_val) + ']'
+
+            if method == 'intersection':
+                args = [self._eval_node(a) for a in node.args]
+                other = args[0] if args and isinstance(args[0], list) else []
+                return [x for x in recv_val if x in other]
+
+            if method in ('union', '|'):
+                args = [self._eval_node(a) for a in node.args]
+                other = args[0] if args and isinstance(args[0], list) else []
+                seen = list(recv_val)
+                for x in other:
+                    if x not in seen:
+                        seen.append(x)
+                return seen
+
+            if method in ('difference', '-'):
+                args = [self._eval_node(a) for a in node.args]
+                other = set(args[0]) if args and isinstance(args[0], list) else set()
+                return [x for x in recv_val if x not in other]
+
+        # ── Hash receiver methods ──────────────────────────────────────────
+        if isinstance(recv_val, dict):
+            if method == 'keys':
+                return list(recv_val.keys())
+            if method == 'values':
+                return list(recv_val.values())
+            if method == 'fetch':
+                args = [self._eval_node(a) for a in node.args]
+                key = str(args[0]).lstrip(':') if args else ''
+                default = args[1] if len(args) > 1 else None
+                return recv_val.get(key, default)
+            if method in ('has_key?', 'key?', 'include?', 'member?'):
+                args = [self._eval_node(a) for a in node.args]
+                key = str(args[0]).lstrip(':') if args else ''
+                return key in recv_val
+            if method in ('size', 'count', 'length'):
+                return len(recv_val)
+            if method in ('empty?',):
+                return len(recv_val) == 0
+            if method == 'merge':
+                args = [self._eval_node(a) for a in node.args]
+                other = args[0] if args and isinstance(args[0], dict) else {}
+                result = dict(recv_val)
+                result.update(other)
+                return result
+            if method == 'update':
+                args = [self._eval_node(a) for a in node.args]
+                other = args[0] if args and isinstance(args[0], dict) else {}
+                recv_val.update(other)
+                return recv_val
+            if method in ('each', 'each_pair') and node.block:
+                for k, v in recv_val.items():
+                    params = node.block.params
+                    if len(params) >= 2:
+                        self._variables[params[0]] = k
+                        self._variables[params[1]] = v
+                    elif params:
+                        self._variables[params[0]] = [k, v]
+                    self._eval_body(node.block.body)
+                return recv_val
+            if method == 'map' and node.block:
+                result = []
+                for k, v in recv_val.items():
+                    params = node.block.params
+                    if len(params) >= 2:
+                        self._variables[params[0]] = k
+                        self._variables[params[1]] = v
+                    elif params:
+                        self._variables[params[0]] = [k, v]
+                    result.append(self._eval_body_last(node.block.body))
+                return result
+            if method in ('any?',) and node.block:
+                for k, v in recv_val.items():
+                    params = node.block.params
+                    if len(params) >= 2:
+                        self._variables[params[0]] = k
+                        self._variables[params[1]] = v
+                    if self._eval_body_last(node.block.body):
+                        return True
+                return False
+            if method in ('all?',) and node.block:
+                for k, v in recv_val.items():
+                    params = node.block.params
+                    if len(params) >= 2:
+                        self._variables[params[0]] = k
+                        self._variables[params[1]] = v
+                    if not self._eval_body_last(node.block.body):
+                        return False
+                return True
+            if method == 'select' and node.block:
+                result = {}
+                for k, v in recv_val.items():
+                    params = node.block.params
+                    if len(params) >= 2:
+                        self._variables[params[0]] = k
+                        self._variables[params[1]] = v
+                    elif params:
+                        self._variables[params[0]] = [k, v]
+                    if self._eval_body_last(node.block.body):
+                        result[k] = v
+                return result
+            if method == 'reject' and node.block:
+                result = {}
+                for k, v in recv_val.items():
+                    params = node.block.params
+                    if len(params) >= 2:
+                        self._variables[params[0]] = k
+                        self._variables[params[1]] = v
+                    if not self._eval_body_last(node.block.body):
+                        result[k] = v
+                return result
+            if method == '[]':
+                args = [self._eval_node(a) for a in node.args]
+                key = str(args[0]).lstrip(':') if args else ''
+                return recv_val.get(key)
+            if method == 'to_a':
+                return [[k, v] for k, v in recv_val.items()]
+            if method == 'to_s':
+                return str(recv_val)
+            if method == 'delete':
+                args = [self._eval_node(a) for a in node.args]
+                key = str(args[0]).lstrip(':') if args else ''
+                return recv_val.pop(key, None)
+            if method == 'store':
+                args = [self._eval_node(a) for a in node.args]
+                key = str(args[0]).lstrip(':') if args else ''
+                val = args[1] if len(args) > 1 else None
+                recv_val[key] = val
+                return val
+            if method in ('each_with_object',) and node.block:
+                args = [self._eval_node(a) for a in node.args]
+                acc = args[0] if args else {}
+                for k, v in recv_val.items():
+                    params = node.block.params
+                    if len(params) >= 2:
+                        self._variables[params[0]] = [k, v]
+                        self._variables[params[1]] = acc
+                    self._eval_body(node.block.body)
+                return acc
+            return None
+
+        # ── Additional string methods ──────────────────────────────────────
+        if isinstance(recv_val, str):
+            if method == 'start_with?':
+                args = [self._eval_node(a) for a in node.args]
+                prefix = str(args[0]) if args else ''
+                return recv_val.startswith(prefix)
+            if method == 'end_with?':
+                args = [self._eval_node(a) for a in node.args]
+                suffix = str(args[0]) if args else ''
+                return recv_val.endswith(suffix)
+            if method == 'include?':
+                args = [self._eval_node(a) for a in node.args]
+                substr = str(args[0]) if args else ''
+                return substr in recv_val
+            if method == 'strip':
+                return recv_val.strip()
+            if method == 'lstrip':
+                return recv_val.lstrip()
+            if method == 'rstrip':
+                return recv_val.rstrip()
+            if method == 'chomp':
+                return recv_val.rstrip('\n\r')
+            if method == 'chop':
+                return recv_val[:-1] if recv_val else ''
+            if method == 'gsub':
+                args = [self._eval_node(a) for a in node.args]
+                pat = str(args[0]) if args else ''
+                repl = str(args[1]) if len(args) > 1 else ''
+                return recv_val.replace(pat, repl)
+            if method == 'sub':
+                args = [self._eval_node(a) for a in node.args]
+                pat = str(args[0]) if args else ''
+                repl = str(args[1]) if len(args) > 1 else ''
+                return recv_val.replace(pat, repl, 1)
+            if method == 'tr':
+                args = [self._eval_node(a) for a in node.args]
+                from_ = str(args[0]) if args else ''
+                to_ = str(args[1]) if len(args) > 1 else ''
+                table = str.maketrans(from_[:len(to_)], to_[:len(from_)]) if from_ and to_ else {}
+                return recv_val.translate(table)
+            if method == 'chars':
+                return list(recv_val)
+            if method == 'bytes':
+                return list(recv_val.encode('utf-8'))
+            if method == 'lines':
+                return recv_val.splitlines(keepends=True)
+            if method in ('size', 'count', 'len') and not node.args:
+                return len(recv_val)
+            if method == 'count' and node.args:
+                args = [self._eval_node(a) for a in node.args]
+                return recv_val.count(str(args[0]))
+            if method == 'empty?':
+                return len(recv_val) == 0
+            if method == 'reverse':
+                return recv_val[::-1]
+            if method in ('freeze', 'frozen?', 'dup', 'clone'):
+                return recv_val
+            if method == 'replace':
+                args = [self._eval_node(a) for a in node.args]
+                return str(args[0]) if args else ''
+            if method == 'capitalize':
+                return recv_val.capitalize()
+            if method == 'center':
+                args = [self._eval_node(a) for a in node.args]
+                width = int(args[0]) if args else 0
+                pad = str(args[1]) if len(args) > 1 else ' '
+                return recv_val.center(width, pad[0] if pad else ' ')
+            if method == 'ljust':
+                args = [self._eval_node(a) for a in node.args]
+                width = int(args[0]) if args else 0
+                return recv_val.ljust(width)
+            if method == 'rjust':
+                args = [self._eval_node(a) for a in node.args]
+                width = int(args[0]) if args else 0
+                return recv_val.rjust(width)
+            if method == 'match?':
+                args = [self._eval_node(a) for a in node.args]
+                import re as _re
+                pat = str(args[0]) if args else ''
+                try:
+                    return bool(_re.search(pat, recv_val))
+                except Exception:
+                    return False
+            if method == 'index':
+                args = [self._eval_node(a) for a in node.args]
+                sub = str(args[0]) if args else ''
+                idx = recv_val.find(sub)
+                return idx if idx >= 0 else None
+            if method == 'to_i':
+                try:
+                    return int(recv_val)
+                except (ValueError, TypeError):
+                    return 0
+            if method == 'to_f':
+                try:
+                    return float(recv_val)
+                except (ValueError, TypeError):
+                    return 0.0
+            if method == 'to_r':
+                try:
+                    return float(recv_val)
+                except (ValueError, TypeError):
+                    return 0.0
+
+        # ── Additional numeric methods ─────────────────────────────────────
+        if isinstance(recv_val, (int, float)):
+            if method == 'gcd' and isinstance(recv_val, int):
+                args = [self._eval_node(a) for a in node.args]
+                other = int(args[0]) if args else 1
+                import math as _math
+                return _math.gcd(abs(recv_val), abs(other))
+            if method == 'lcm' and isinstance(recv_val, int):
+                args = [self._eval_node(a) for a in node.args]
+                other = int(args[0]) if args else 1
+                import math as _math
+                g = _math.gcd(abs(recv_val), abs(other))
+                return abs(recv_val * other) // g if g else 0
+            if method == 'infinite?':
+                import math as _math
+                if isinstance(recv_val, float) and _math.isinf(recv_val):
+                    return 1 if recv_val > 0 else -1
+                return None
+            if method in ('finite?',):
+                import math as _math
+                return isinstance(recv_val, float) and not _math.isinf(recv_val) and not _math.isnan(recv_val)
+            if method in ('nan?',):
+                import math as _math
+                return isinstance(recv_val, float) and _math.isnan(recv_val)
+            if method == 'digits':
+                n = abs(int(recv_val))
+                if n == 0:
+                    return [0]
+                digits = []
+                while n > 0:
+                    digits.append(n % 10)
+                    n //= 10
+                return digits
+            if method in ('to_r',):
+                return float(recv_val)
+            if method in ('divmod',):
+                args = [self._eval_node(a) for a in node.args]
+                other = self._to_float(args[0]) if args else 1
+                if other == 0:
+                    return [0, 0]
+                return [int(recv_val // other), recv_val % other]
+            if method == 'coerce':
+                args = [self._eval_node(a) for a in node.args]
+                other = args[0] if args else 0
+                return [float(other), float(recv_val)]
 
         return None
 
@@ -1400,6 +1965,23 @@ class Evaluator:
 
     def _call_noop(self, node: MethodCall):
         return None
+
+    def _call_with_block_noop(self, node: MethodCall):
+        """Execute block unchanged (e.g. with_tuning)."""
+        if node.block:
+            self._eval_body(node.block.body)
+        return None
+
+    def _call_synth_names(self, node: MethodCall) -> list:
+        return [
+            'beep', 'sine', 'saw', 'pulse', 'square', 'tri', 'dsaw',
+            'fm', 'mod_fm', 'mod_saw', 'mod_dsaw', 'mod_sine', 'mod_tri',
+            'mod_pulse', 'supersaw', 'hoover', 'synth_piano', 'tb303',
+            'prophet', 'piano', 'pluck', 'pretty_bell', 'kalimba',
+            'blade', 'dark_ambience', 'growl', 'hollow', 'zawa',
+            'noise', 'pnoise', 'bnoise', 'gnoise', 'cnoise',
+            'subpulse', 'tech_saws', 'bass_foundation', 'bass_highend',
+        ]
 
     def _call_loop(self, node: MethodCall):
         """loop do...end – unroll like live_loop."""

@@ -66,6 +66,7 @@ class TT(Enum):
     STAR_ASSIGN  = auto()   # *=
     SLASH_ASSIGN = auto()   # /=
     OR_ASSIGN    = auto()   # ||=
+    LSHIFT       = auto()   # <<  (append / left-shift)
     # Punctuation
     DOT       = auto()      # .
     COMMA     = auto()      # ,
@@ -112,7 +113,7 @@ KEYWORDS: dict[str, TT] = {
 # the expression — used to decide whether a NEWLINE is significant.
 _CONTINUATION_TYPES = {
     TT.PLUS, TT.MINUS, TT.STAR, TT.SLASH, TT.PERCENT, TT.STARSTAR,
-    TT.EQ, TT.NEQ, TT.LT, TT.GT, TT.LTE, TT.GTE,
+    TT.EQ, TT.NEQ, TT.LT, TT.GT, TT.LTE, TT.GTE, TT.LSHIFT,
     TT.COMMA, TT.DOT, TT.ASSIGN,
     TT.LPAREN, TT.LBRACKET, TT.LBRACE,
     TT.AND, TT.OR, TT.DO,
@@ -220,6 +221,8 @@ def tokenize(source: str) -> list[Token]:
             add(TT.GTE, '>='); pos += 2; continue
         if two == '..':
             add(TT.DOTDOT, '..'); pos += 2; continue
+        if two == '<<':
+            add(TT.LSHIFT, '<<'); pos += 2; continue
         if two == '+=':
             add(TT.PLUS_ASSIGN, '+='); pos += 2; continue
         if two == '-=':

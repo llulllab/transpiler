@@ -1053,6 +1053,252 @@ def test_dot_paren_call():
     assert abs(events[0].args['note'] - 60.0) < 0.01
 
 
+# ── Hash methods ─────────────────────────────────────────────────────────
+
+def test_hash_keys():
+    events = synths("h = {a: 60, b: 64}\nplay h.keys.size")
+    assert abs(events[0].args['note'] - 2.0) < 0.01
+
+
+def test_hash_values():
+    events = synths("h = {a: 60}\nplay h.values[0]")
+    assert abs(events[0].args['note'] - 60.0) < 0.01
+
+
+def test_hash_fetch():
+    events = synths("h = {a: 60}\nplay h.fetch(:a)")
+    assert abs(events[0].args['note'] - 60.0) < 0.01
+
+
+def test_hash_fetch_default():
+    events = synths("h = {a: 60}\nplay h.fetch(:z, 64)")
+    assert abs(events[0].args['note'] - 64.0) < 0.01
+
+
+def test_hash_has_key():
+    events = synths("h = {a: 60}\nplay h[:a] if h.has_key?(:a)")
+    assert abs(events[0].args['note'] - 60.0) < 0.01
+
+
+def test_hash_size():
+    events = synths("h = {a: 1, b: 2}\nplay h.size")
+    assert abs(events[0].args['note'] - 2.0) < 0.01
+
+
+def test_hash_merge():
+    events = synths("h = {a: 1}.merge({b: 2})\nplay h.size")
+    assert abs(events[0].args['note'] - 2.0) < 0.01
+
+
+def test_hash_each():
+    events = synths("h = {a: 60, b: 64}\nh.each {|k,v| play v}")
+    assert len(events) == 2
+
+
+def test_hash_map():
+    events = synths("h = {a: 30, b: 30}\narr = h.map {|k,v| v}\nplay arr.sum")
+    assert abs(events[0].args['note'] - 60.0) < 0.01
+
+
+def test_hash_select():
+    events = synths("h = {a: 60, b: 2}\nr = h.select {|k,v| v > 10}\nplay r.size")
+    assert abs(events[0].args['note'] - 1.0) < 0.01
+
+
+def test_hash_delete():
+    events = synths("h = {a: 60, b: 2}\nh.delete(:b)\nplay h.size")
+    assert abs(events[0].args['note'] - 1.0) < 0.01
+
+
+# ── New array methods ─────────────────────────────────────────────────────
+
+def test_flat_map():
+    events = synths("play [[60,64],[67]].flat_map {|x| x}.size")
+    assert abs(events[0].args['note'] - 3.0) < 0.01
+
+
+def test_any_true():
+    events = synths("play 60 if [1,2,3].any? {|n| n > 2}")
+    assert abs(events[0].args['note'] - 60.0) < 0.01
+
+
+def test_any_false():
+    events = synths("play 60 if [1,2,3].any? {|n| n > 10}")
+    assert len(events) == 0
+
+
+def test_all_true():
+    events = synths("play 60 if [2,4,6].all? {|n| n.even?}")
+    assert abs(events[0].args['note'] - 60.0) < 0.01
+
+
+def test_none_true():
+    events = synths("play 60 if [2,4,6].none? {|n| n.odd?}")
+    assert abs(events[0].args['note'] - 60.0) < 0.01
+
+
+def test_array_join():
+    events = synths('x = [1,2,3].join(",")\nplay x.length')
+    assert abs(events[0].args['note'] - 5.0) < 0.01
+
+
+def test_array_push():
+    events = synths("a = [60]\na.push(64)\nplay a.size")
+    assert abs(events[0].args['note'] - 2.0) < 0.01
+
+
+def test_array_append_operator():
+    events = synths("a = [60]\na << 64\nplay a.size")
+    assert abs(events[0].args['note'] - 2.0) < 0.01
+
+
+def test_array_index():
+    events = synths("play [60,64,67].index(64)")
+    assert abs(events[0].args['note'] - 1.0) < 0.01
+
+
+def test_array_min_by():
+    events = synths("play [64,60,67].min_by {|x| x}")
+    assert abs(events[0].args['note'] - 60.0) < 0.01
+
+
+def test_array_max_by():
+    events = synths("play [64,60,67].max_by {|x| x}")
+    assert abs(events[0].args['note'] - 67.0) < 0.01
+
+
+def test_each_with_object():
+    events = synths("r = [1,2,3].each_with_object([]) {|x,a| a << x*20}\nplay r.sum")
+    assert abs(events[0].args['note'] - 120.0) < 0.01
+
+
+def test_delete_if():
+    events = synths("a = [60,64,67]\na.delete_if {|x| x > 64}\nplay a.size")
+    assert abs(events[0].args['note'] - 2.0) < 0.01
+
+
+def test_tally():
+    events = synths("x = [60,60,64].tally\nplay x.keys.size")
+    assert abs(events[0].args['note'] - 2.0) < 0.01
+
+
+def test_group_by():
+    events = synths("x = [60,60,64].group_by {|n| n}\nplay x.keys.size")
+    assert abs(events[0].args['note'] - 2.0) < 0.01
+
+
+def test_array_concat():
+    events = synths("a = [10,20] + [30]\nplay a.sum")
+    assert abs(events[0].args['note'] - 60.0) < 0.01
+
+
+def test_array_pop():
+    events = synths("a = [60,64]\nplay a.pop")
+    assert abs(events[0].args['note'] - 64.0) < 0.01
+
+
+def test_array_shift():
+    events = synths("a = [60,64]\nplay a.shift")
+    assert abs(events[0].args['note'] - 60.0) < 0.01
+
+
+# ── String methods ────────────────────────────────────────────────────────
+
+def test_string_start_with():
+    events = synths('play 60 if "hello".start_with?("he")')
+    assert abs(events[0].args['note'] - 60.0) < 0.01
+
+
+def test_string_end_with():
+    events = synths('play 60 if "hello".end_with?("lo")')
+    assert abs(events[0].args['note'] - 60.0) < 0.01
+
+
+def test_string_include():
+    events = synths('play 60 if "hello".include?("ell")')
+    assert abs(events[0].args['note'] - 60.0) < 0.01
+
+
+def test_string_strip():
+    events = synths('play " hi ".strip.length')
+    assert abs(events[0].args['note'] - 2.0) < 0.01
+
+
+def test_string_chomp():
+    events = synths('play "hello".chomp.length')
+    assert abs(events[0].args['note'] - 5.0) < 0.01
+
+
+def test_string_gsub():
+    events = synths('play "aab".gsub("a","x").length')
+    assert abs(events[0].args['note'] - 3.0) < 0.01
+
+
+def test_string_chars():
+    events = synths('play "hello".chars.size')
+    assert abs(events[0].args['note'] - 5.0) < 0.01
+
+
+def test_string_reverse():
+    events = synths('play "hello".reverse.length')
+    assert abs(events[0].args['note'] - 5.0) < 0.01
+
+
+# ── tap / then ────────────────────────────────────────────────────────────
+
+def test_tap_returns_self():
+    events = synths("play 60.tap {|n| puts n}")
+    assert abs(events[0].args['note'] - 60.0) < 0.01
+
+
+def test_then_yields():
+    events = synths("play 30.then {|n| n * 2}")
+    assert abs(events[0].args['note'] - 60.0) < 0.01
+
+
+# ── Numeric methods ───────────────────────────────────────────────────────
+
+def test_num_gcd():
+    events = synths("play 12.gcd(8)")
+    assert abs(events[0].args['note'] - 4.0) < 0.01
+
+
+def test_num_lcm():
+    events = synths("play 4.lcm(5)")
+    assert abs(events[0].args['note'] - 20.0) < 0.01
+
+
+def test_num_digits():
+    events = synths("play 123.digits.size")
+    assert abs(events[0].args['note'] - 3.0) < 0.01
+
+
+# ── Array.new with block ──────────────────────────────────────────────────
+
+def test_array_new_block():
+    events = synths("a = Array.new(3) {|i| i * 20 + 20}\nplay a.sum")
+    assert abs(events[0].args['note'] - 120.0) < 0.01
+
+
+# ── use_tuning / with_tuning ─────────────────────────────────────────────
+
+def test_use_tuning():
+    events = synths("use_tuning :equal\nplay 60")
+    assert abs(events[0].args['note'] - 60.0) < 0.01
+
+
+def test_with_tuning():
+    events = synths("with_tuning :equal do\nplay 60\nend")
+    assert abs(events[0].args['note'] - 60.0) < 0.01
+
+
+# ── synth_names ───────────────────────────────────────────────────────────
+
+def test_synth_names_not_empty():
+    events = ev("x = synth_names\nplay 60 if x.size > 0")
+    assert len([e for e in events if e.kind == 'synth']) == 1
+
+
 if __name__ == "__main__":
     import pytest
     pytest.main([__file__, "-v"])
