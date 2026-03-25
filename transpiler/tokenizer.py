@@ -84,6 +84,8 @@ class TT(Enum):
     PIPE_PIPE   = auto()   # ||
     QUESTION  = auto()     # ?  (ternary)
     COLON     = auto()     # :  (ternary else, standalone)
+    AMPER     = auto()     # &  (block reference / bitwise AND)
+    ARROW     = auto()     # ->  (lambda literal)
     NEWLINE   = auto()
     EOF       = auto()
 
@@ -201,6 +203,61 @@ def tokenize(source: str) -> list[Token]:
             _had_space = True
             continue
 
+        # ── Heredoc  <<~IDENT or <<IDENT  ───────────────────────────────
+        if ch == '<' and pos + 1 < length and source[pos + 1] == '<':
+            # Only treat as heredoc when followed by optional ~ then [A-Z_a-z]
+            p2 = pos + 2
+            squiggly = False
+            if p2 < length and source[p2] == '~':
+                squiggly = True
+                p2 += 1
+            if p2 < length and (source[p2].isalpha() or source[p2] == '_'):
+                # Collect delimiter name
+                m = re.match(r'[A-Za-z_][A-Za-z0-9_]*', source[p2:])
+                delim = m.group()
+                pos = p2 + len(delim)
+                # Skip rest of current line
+                while pos < length and source[pos] != '\n':
+                    pos += 1
+                if pos < length:
+                    pos += 1   # consume '\n'
+                    line += 1
+                # Collect body lines until we see the delimiter alone on a line
+                buf = []
+                indent = None
+                while pos < length:
+                    # Find end of this line
+                    line_start = pos
+                    while pos < length and source[pos] != '\n':
+                        pos += 1
+                    this_line = source[line_start:pos]
+                    if pos < length:
+                        pos += 1
+                        line += 1
+                    stripped = this_line.strip()
+                    if stripped == delim:
+                        break
+                    if squiggly:
+                        # strip common leading whitespace
+                        raw = this_line.expandtabs()
+                        leading = len(raw) - len(raw.lstrip())
+                        if indent is None or leading < indent:
+                            indent = leading
+                    buf.append(this_line)
+                # Strip common indent for <<~
+                if squiggly and indent:
+                    processed = []
+                    for ln_s in buf:
+                        expanded = ln_s.expandtabs()
+                        processed.append(expanded[indent:])
+                    text = '\n'.join(processed)
+                else:
+                    text = '\n'.join(buf)
+                add(TT.STRING, text)
+                # heredoc consumed a newline — don't emit NEWLINE for the opener line
+                _had_space = True
+                continue
+
         # ── Three-char operators ─────────────────────────────────────────
         three = source[pos:pos + 3]
         if three == '||=':
@@ -230,6 +287,9 @@ def tokenize(source: str) -> list[Token]:
             add(TT.LSHIFT, '<<'); pos += 2; continue
         if two == '::':
             add(TT.SCOPE, '::'); pos += 2; continue
+        if two == '->':\
+            add(TT.ARROW, '->'); pos += 2; continue
+
         if two == '+=':
             add(TT.PLUS_ASSIGN, '+='); pos += 2; continue
         if two == '-=':
@@ -272,15 +332,22 @@ def tokenize(source: str) -> list[Token]:
         # ── String literal ───────────────────────────────────────────────
         if ch == '"':
             pos += 1
+            parts: list = []
             buf = []
+            has_interp = False
             while pos < length and source[pos] != '"':
                 if source[pos] == '\\' and pos + 1 < length:
                     esc = source[pos + 1]
                     buf.append({'n': '\n', 't': '\t', '\\': '\\', '"': '"'}.get(esc, esc))
                     pos += 2
                 elif source[pos] == '#' and pos + 1 < length and source[pos + 1] == '{':
-                    # String interpolation #{expr} – skip to matching }
-                    pos += 2
+                    # String interpolation #{expr} – collect raw expression source
+                    has_interp = True
+                    if buf:
+                        parts.append(('lit', ''.join(buf)))
+                        buf = []
+                    pos += 2  # skip #{
+                    expr_start = pos
                     depth = 1
                     while pos < length and depth > 0:
                         if source[pos] == '{':
@@ -288,12 +355,18 @@ def tokenize(source: str) -> list[Token]:
                         elif source[pos] == '}':
                             depth -= 1
                         pos += 1
-                    # interpolated content discarded for now; leave placeholder
+                    expr_src = source[expr_start:pos - 1]  # content between #{ and }
+                    parts.append(('expr', expr_src))
                 else:
                     buf.append(source[pos])
                     pos += 1
             pos += 1  # closing "
-            add(TT.STRING, ''.join(buf))
+            if has_interp:
+                if buf:
+                    parts.append(('lit', ''.join(buf)))
+                add(TT.STRING, parts)  # list value signals interpolated string
+            else:
+                add(TT.STRING, ''.join(buf))
             continue
 
         if ch == "'":
@@ -378,6 +451,41 @@ def tokenize(source: str) -> list[Token]:
             add(TT.RBRACKET, ']')
             continue
 
+        # ── Regex literal  /pattern/flags  ─────────────────────────────
+        # Treat as regex only when '/' appears where an expression is expected
+        # (i.e. after ASSIGN, LPAREN, COMMA, start-of-statement)
+        if ch == '/':
+            ls = last_significant()
+            _regex_starters = {
+                TT.ASSIGN, TT.LPAREN, TT.COMMA, TT.EQ, TT.NEQ,
+                TT.LBRACE, TT.LBRACKET, TT.DO, TT.PIPE,
+                TT.AND, TT.OR, TT.AMPER_AMPER, TT.PIPE_PIPE,
+                TT.NEWLINE,
+            }
+            if ls is None or ls.type in _regex_starters:
+                pos += 1  # skip opening /
+                buf = []
+                while pos < length and source[pos] != '/':
+                    if source[pos] == '\\' and pos + 1 < length:
+                        buf.append('\\')
+                        buf.append(source[pos + 1])
+                        pos += 2
+                    elif source[pos] == '\n':
+                        break  # unterminated regex
+                    else:
+                        buf.append(source[pos])
+                        pos += 1
+                if pos < length and source[pos] == '/':
+                    pos += 1  # skip closing /
+                    # Skip flags (g, i, m, x, ...)
+                    while pos < length and source[pos].isalpha():
+                        pos += 1
+                    add(TT.STRING, ''.join(buf))  # regex stored as string pattern
+                    continue
+                else:
+                    # Not a regex — rewind and fall through to SLASH
+                    pos -= 1
+
         # ── Single-char tokens ───────────────────────────────────────────
         SINGLE = {
             '=': TT.ASSIGN,
@@ -397,6 +505,7 @@ def tokenize(source: str) -> list[Token]:
             '{': TT.LBRACE,
             '}': TT.RBRACE,
             '|': TT.PIPE,
+            '&': TT.AMPER,
         }
         if ch in SINGLE:
             add(SINGLE[ch], ch)

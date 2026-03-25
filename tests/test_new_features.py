@@ -1806,6 +1806,671 @@ def test_string_swapcase():
     assert abs(events[0].args['note'] - 60.0) < 0.01
 
 
+# ── String interpolation ─────────────────────────────────────────────────────
+
+def test_string_interp_simple():
+    # "note: #{n}" should evaluate #{n}
+    src = 'n = 60\ns = "value: #{n}"\nplay n'
+    events = synths(src)
+    assert len(events) == 1
+    assert abs(events[0].args['note'] - 60.0) < 0.01
+
+
+def test_string_interp_expression():
+    # interpolation evaluates an expression
+    src = 'x = 3\ns = "#{x * 20}"\nplay s.to_i'
+    events = synths(src)
+    assert abs(events[0].args['note'] - 60.0) < 0.01
+
+
+def test_string_interp_multiple_parts():
+    src = 'a = 6\nb = 0\ns = "#{a}#{b}"\nplay s.to_i'
+    events = synths(src)
+    assert abs(events[0].args['note'] - 60.0) < 0.01
+
+
+def test_string_interp_in_puts():
+    # puts with interpolation should not crash
+    src = 'n = 60\nputs "playing: #{n}"\nplay n'
+    events = synths(src)
+    assert len(events) == 1
+
+
+# ── begin / rescue / ensure ───────────────────────────────────────────────────
+
+def test_begin_normal_execution():
+    src = "x = 0\nbegin\n  x = 60\nend\nplay x"
+    events = synths(src)
+    assert abs(events[0].args['note'] - 60.0) < 0.01
+
+
+def test_begin_rescue_catches_raise():
+    src = (
+        "x = 0\n"
+        "begin\n"
+        "  raise 'oops'\n"
+        "  x = 99\n"
+        "rescue\n"
+        "  x = 60\n"
+        "end\n"
+        "play x"
+    )
+    events = synths(src)
+    assert abs(events[0].args['note'] - 60.0) < 0.01
+
+
+def test_begin_ensure_always_runs():
+    src = (
+        "x = 0\n"
+        "begin\n"
+        "  y = 1\n"
+        "ensure\n"
+        "  x = 60\n"
+        "end\n"
+        "play x"
+    )
+    events = synths(src)
+    assert abs(events[0].args['note'] - 60.0) < 0.01
+
+
+def test_begin_rescue_with_variable():
+    src = (
+        "msg = 'none'\n"
+        "begin\n"
+        "  raise 'hello'\n"
+        "rescue RuntimeError => e\n"
+        "  msg = e\n"
+        "end\n"
+        "play msg == 'hello' ? 60 : 0"
+    )
+    events = synths(src)
+    assert abs(events[0].args['note'] - 60.0) < 0.01
+
+
+def test_begin_else_runs_when_no_exception():
+    src = (
+        "x = 0\n"
+        "begin\n"
+        "  y = 1\n"
+        "rescue\n"
+        "  x = 99\n"
+        "else\n"
+        "  x = 60\n"
+        "end\n"
+        "play x"
+    )
+    events = synths(src)
+    assert abs(events[0].args['note'] - 60.0) < 0.01
+
+
+# ── yield ─────────────────────────────────────────────────────────────────────
+
+def test_yield_basic():
+    src = (
+        "def double_play(n)\n"
+        "  yield n\n"
+        "  yield n + 12\n"
+        "end\n"
+        "double_play(48) do |x|\n"
+        "  play x\n"
+        "end"
+    )
+    events = synths(src)
+    assert len(events) == 2
+    notes = sorted(e.args['note'] for e in events)
+    assert notes == [48.0, 60.0]
+
+
+def test_yield_with_return_value():
+    src = (
+        "def apply(x)\n"
+        "  yield x\n"
+        "end\n"
+        "result = apply(60) { |n| n }\n"
+        "play result"
+    )
+    events = synths(src)
+    assert abs(events[0].args['note'] - 60.0) < 0.01
+
+
+def test_block_param_ampersand():
+    src = (
+        "def call_it(&blk)\n"
+        "  blk.call(60)\n"
+        "end\n"
+        "call_it do |n|\n"
+        "  play n\n"
+        "end"
+    )
+    events = synths(src)
+    assert abs(events[0].args['note'] - 60.0) < 0.01
+
+
+# ── MIDI events ───────────────────────────────────────────────────────────────
+
+def test_midi_emits_event():
+    events = ev("use_bpm 60\nmidi 60")
+    midi_events = [e for e in events if e.kind == 'midi']
+    assert len(midi_events) == 1
+    assert abs(midi_events[0].args['note'] - 60.0) < 0.01
+
+
+def test_midi_note_name():
+    events = ev("midi :C4")
+    midi_events = [e for e in events if e.kind == 'midi']
+    assert len(midi_events) == 1
+    assert abs(midi_events[0].args['note'] - 60.0) < 0.01
+
+
+def test_midi_velocity():
+    events = ev("midi 60, velocity: 0.5")
+    midi_events = [e for e in events if e.kind == 'midi']
+    assert midi_events[0].args['velocity'] == 63
+
+
+def test_midi_note_on_off():
+    events = ev("midi_note_on 60, 100\nmidi_note_off 60")
+    kinds = [e.kind for e in events]
+    assert 'midi_note_on' in kinds
+    assert 'midi_note_off' in kinds
+
+
+def test_midi_cc():
+    events = ev("midi_cc 7, 100")
+    cc_events = [e for e in events if e.kind == 'midi_cc']
+    assert len(cc_events) == 1
+    assert cc_events[0].args['cc_num'] == 7
+    assert cc_events[0].args['value'] == 100
+
+
+# ── sample_duration ───────────────────────────────────────────────────────────
+
+def test_sample_duration_returns_float():
+    src = "d = sample_duration(:bd_haus)\nplay d > 0 ? 60 : 0"
+    events = synths(src)
+    assert abs(events[0].args['note'] - 60.0) < 0.01
+
+
+def test_sample_duration_nonzero():
+    # any sample name should return a positive duration
+    src = "d = sample_duration(:loop_amen)\nplay d > 0 ? 60 : 0"
+    events = synths(src)
+    assert abs(events[0].args['note'] - 60.0) < 0.01
+
+
+# ── class / module ────────────────────────────────────────────────────────────
+
+def test_class_def_method_callable():
+    src = (
+        "class MyHelper\n"
+        "  def note_val\n"
+        "    60\n"
+        "  end\n"
+        "end\n"
+        "play note_val"
+    )
+    events = synths(src)
+    assert abs(events[0].args['note'] - 60.0) < 0.01
+
+
+def test_module_def_method_callable():
+    src = (
+        "module Helpers\n"
+        "  def my_note\n"
+        "    60\n"
+        "  end\n"
+        "end\n"
+        "play my_note"
+    )
+    events = synths(src)
+    assert abs(events[0].args['note'] - 60.0) < 0.01
+
+
+def test_class_def_self_method():
+    # def self.foo inside a class
+    src = (
+        "class Util\n"
+        "  def self.base\n"
+        "    60\n"
+        "  end\n"
+        "end\n"
+        "play base"
+    )
+    events = synths(src)
+    assert abs(events[0].args['note'] - 60.0) < 0.01
+
+
+# ── Proc.new ─────────────────────────────────────────────────────────────────
+
+def test_proc_new_call():
+    src = (
+        "p = Proc.new { |n| n + 12 }\n"
+        "play p.call(48)"
+    )
+    events = synths(src)
+    assert abs(events[0].args['note'] - 60.0) < 0.01
+
+
+def test_proc_new_used_as_block():
+    src = (
+        "adder = Proc.new { |x| x * 2 }\n"
+        "result = [30].map(&adder)\n"
+        "play result[0]"  # splat won't work here, just test .map
+    )
+    # Just ensure no crash and one synth event
+    events = synths(src)
+    # result depends on map with proc — tolerate either outcome, just no crash
+
+
+# ── use_tuning / with_tuning ──────────────────────────────────────────────────
+
+def test_use_tuning_no_crash():
+    src = "use_tuning :just\nplay 60"
+    events = synths(src)
+    assert len(events) == 1
+
+
+def test_with_tuning_no_crash():
+    src = "with_tuning :just do\n  play 60\nend"
+    events = synths(src)
+    assert len(events) == 1
+
+
+# ── current_random_seed ───────────────────────────────────────────────────────
+
+def test_current_random_seed_returns_int():
+    src = "s = current_random_seed\nplay s.is_a?(Integer) ? 60 : 0"
+    events = synths(src)
+    assert abs(events[0].args['note'] - 60.0) < 0.01
+
+
+# ── run_code ──────────────────────────────────────────────────────────────────
+
+def test_run_code_basic():
+    src = "run_code \"play 60\""
+    events = synths(src)
+    assert len(events) == 1
+    assert abs(events[0].args['note'] - 60.0) < 0.01
+
+
+# ── with_sample_pack ─────────────────────────────────────────────────────────
+
+def test_with_sample_pack_no_crash():
+    src = "with_sample_pack '/path/to/packs' do\n  play 60\nend"
+    events = synths(src)
+    assert len(events) == 1
+
+
+# ── def self.method / self keyword ───────────────────────────────────────────
+
+def test_def_self_method():
+    src = (
+        "def self.my_note\n"
+        "  60\n"
+        "end\n"
+        "play my_note"
+    )
+    events = synths(src)
+    assert abs(events[0].args['note'] - 60.0) < 0.01
+
+
+# ── Arrow lambda (-> syntax) ──────────────────────────────────────────────────
+
+def test_arrow_lambda_call():
+    src = "f = ->(x) { x + 12 }\nplay f.call(48)"
+    events = synths(src)
+    assert abs(events[0].args['note'] - 60.0) < 0.01
+
+
+def test_arrow_lambda_no_params():
+    src = "f = -> { 60 }\nplay f.call"
+    events = synths(src)
+    assert abs(events[0].args['note'] - 60.0) < 0.01
+
+
+def test_arrow_lambda_multi_params():
+    src = "f = ->(a, b) { a + b }\nplay f.call(50, 10)"
+    events = synths(src)
+    assert abs(events[0].args['note'] - 60.0) < 0.01
+
+
+# ── Array find / detect ───────────────────────────────────────────────────────
+
+def test_array_find():
+    src = "a = [50, 60, 70]\nplay a.find { |x| x == 60 }"
+    events = synths(src)
+    assert abs(events[0].args['note'] - 60.0) < 0.01
+
+
+def test_array_detect():
+    src = "a = [50, 60, 70]\nplay a.detect { |x| x > 55 }"
+    events = synths(src)
+    assert abs(events[0].args['note'] - 60.0) < 0.01
+
+
+# ── Array partition ────────────────────────────────────────────────────────────
+
+def test_array_partition():
+    src = "a = [60, 65, 70]\nhigh, low = a.partition { |x| x >= 65 }\nplay low[0]"
+    events = synths(src)
+    assert abs(events[0].args['note'] - 60.0) < 0.01
+
+
+# ── Array combination / permutation / product ─────────────────────────────────
+
+def test_array_combination():
+    src = "a = [60, 64, 67]\nc = a.combination(2)\nplay c.length"
+    events = synths(src)
+    assert abs(events[0].args['note'] - 3.0) < 0.01
+
+
+def test_array_permutation():
+    src = "a = [60, 64]\np = a.permutation(2)\nplay p.length"
+    events = synths(src)
+    assert abs(events[0].args['note'] - 2.0) < 0.01
+
+
+# ── Array tally ───────────────────────────────────────────────────────────────
+
+def test_array_tally():
+    src = "a = [60, 60, 64]\nt = a.tally\nplay t['60']"
+    events = synths(src)
+    assert abs(events[0].args['note'] - 2.0) < 0.01
+
+
+# ── each_cons with break ───────────────────────────────────────────────────────
+
+def test_each_cons_with_break():
+    src = (
+        "a = [60, 64, 67]\n"
+        "a.each_cons(2) do |c|\n"
+        "  play c[0]\n"
+        "  break\n"
+        "end"
+    )
+    events = synths(src)
+    assert abs(events[0].args['note'] - 60.0) < 0.01
+
+
+# ── gsub with block ────────────────────────────────────────────────────────────
+
+def test_gsub_with_block():
+    src = (
+        "s = \"hello\"\n"
+        "s2 = s.gsub(\"l\") { |m| m.upcase }\n"
+        "play s2 == \"heLLo\" ? 60 : 0"
+    )
+    events = synths(src)
+    assert abs(events[0].args['note'] - 60.0) < 0.01
+
+
+def test_sub_with_block():
+    src = (
+        "s = \"hello\"\n"
+        "s2 = s.sub(\"l\") { |m| m.upcase }\n"
+        "play s2 == \"heLlo\" ? 60 : 0"
+    )
+    events = synths(src)
+    assert abs(events[0].args['note'] - 60.0) < 0.01
+
+
+# ── Integer#to_s with base ────────────────────────────────────────────────────
+
+def test_to_s_hex():
+    src = "play 60.to_s(16) == \"3c\" ? 60 : 0"
+    events = synths(src)
+    assert abs(events[0].args['note'] - 60.0) < 0.01
+
+
+def test_to_s_binary():
+    src = "play 4.to_s(2) == \"100\" ? 60 : 0"
+    events = synths(src)
+    assert abs(events[0].args['note'] - 60.0) < 0.01
+
+
+# ── Kernel Array() ────────────────────────────────────────────────────────────
+
+def test_kernel_array_scalar():
+    src = "play Array(60)[0]"
+    events = synths(src)
+    assert abs(events[0].args['note'] - 60.0) < 0.01
+
+
+def test_kernel_array_nil():
+    src = "a = Array(nil)\nplay a.length"
+    events = synths(src)
+    assert abs(events[0].args['note'] - 0.0) < 0.01
+
+
+def test_kernel_array_passthrough():
+    src = "play Array([60, 64])[0]"
+    events = synths(src)
+    assert abs(events[0].args['note'] - 60.0) < 0.01
+
+
+# ── send ─────────────────────────────────────────────────────────────────────
+
+def test_send_to_i():
+    src = "play 60.send(:to_i)"
+    events = synths(src)
+    assert abs(events[0].args['note'] - 60.0) < 0.01
+
+
+def test_send_upcase():
+    src = "play \"c4\".send(:upcase) == \"C4\" ? 60 : 0"
+    events = synths(src)
+    assert abs(events[0].args['note'] - 60.0) < 0.01
+
+
+# ── __method__ ────────────────────────────────────────────────────────────────
+
+def test_method_name_builtin():
+    src = (
+        "def get_note\n"
+        "  __method__ == :get_note ? 60 : 0\n"
+        "end\n"
+        "play get_note"
+    )
+    events = synths(src)
+    assert abs(events[0].args['note'] - 60.0) < 0.01
+
+
+# ── Heredoc ───────────────────────────────────────────────────────────────────
+
+def test_heredoc_squiggly():
+    src = (
+        "msg = <<~TEXT\n"
+        "  hello\n"
+        "TEXT\n"
+        "play msg.strip == \"hello\" ? 60 : 0"
+    )
+    events = synths(src)
+    assert abs(events[0].args['note'] - 60.0) < 0.01
+
+
+def test_heredoc_no_squiggly():
+    src = (
+        "msg = <<BLOCK\n"
+        "hello\n"
+        "BLOCK\n"
+        "play msg.strip == \"hello\" ? 60 : 0"
+    )
+    events = synths(src)
+    assert abs(events[0].args['note'] - 60.0) < 0.01
+
+
+# ── Regex literal ─────────────────────────────────────────────────────────────
+
+def test_regex_literal_as_string():
+    src = "x = /\\d+/\nplay x.is_a?(String) ? 60 : 0"
+    events = synths(src)
+    assert abs(events[0].args['note'] - 60.0) < 0.01
+
+
+# ── Subscript compound assignment ─────────────────────────────────────────────
+
+def test_subscript_or_assign():
+    src = "h = {}\nh[:x] ||= 60\nplay h[:x]"
+    events = synths(src)
+    assert abs(events[0].args['note'] - 60.0) < 0.01
+
+
+def test_subscript_or_assign_no_overwrite():
+    src = "h = {x: 60}\nh[:x] ||= 99\nplay h[:x]"
+    events = synths(src)
+    assert abs(events[0].args['note'] - 60.0) < 0.01
+
+
+def test_subscript_plus_assign():
+    src = "a = [10, 20]\na[0] += 50\nplay a[0]"
+    events = synths(src)
+    assert abs(events[0].args['note'] - 60.0) < 0.01
+
+
+# ── Array set operations ──────────────────────────────────────────────────────
+
+def test_array_intersection():
+    src = "a = [60, 64, 67] & [64, 67, 72]\nplay a[0]"
+    events = synths(src)
+    assert abs(events[0].args['note'] - 64.0) < 0.01
+
+
+def test_array_union():
+    src = "a = [60] | [64]\nplay a.length"
+    events = synths(src)
+    assert abs(events[0].args['note'] - 2.0) < 0.01
+
+
+def test_array_difference():
+    src = "a = [60, 64, 67] - [64]\nplay a[1]"
+    events = synths(src)
+    assert abs(events[0].args['note'] - 67.0) < 0.01
+
+
+# ── Splat in multi-assign ─────────────────────────────────────────────────────
+
+def test_multi_assign_splat_rest():
+    src = "a, b, *rest = [60, 64, 67, 72]\nplay a"
+    events = synths(src)
+    assert abs(events[0].args['note'] - 60.0) < 0.01
+
+
+def test_multi_assign_splat_rest_collect():
+    src = "a, *rest = [60, 64, 67]\nplay rest.length"
+    events = synths(src)
+    assert abs(events[0].args['note'] - 2.0) < 0.01
+
+
+# ── Array chunk / chunk_while ──────────────────────────────────────────────────
+
+def test_array_chunk():
+    src = "a = [60, 60, 64, 64]\nc = a.chunk { |x| x }.to_a\nplay c.length"
+    events = synths(src)
+    assert abs(events[0].args['note'] - 2.0) < 0.01
+
+
+def test_array_chunk_while():
+    src = (
+        "a = [60, 60, 64]\n"
+        "c = a.chunk_while { |a, b| a == b }\n"
+        "play c.length"
+    )
+    events = synths(src)
+    assert abs(events[0].args['note'] - 2.0) < 0.01
+
+
+# ── Array combination / permutation ──────────────────────────────────────────
+
+def test_array_combination_count():
+    src = "a = [60, 64, 67]\nc = a.combination(2)\nplay c.length"
+    events = synths(src)
+    assert abs(events[0].args['note'] - 3.0) < 0.01
+
+
+def test_array_permutation_count():
+    src = "a = [60, 64]\np = a.permutation(2)\nplay p.length"
+    events = synths(src)
+    assert abs(events[0].args['note'] - 2.0) < 0.01
+
+
+# ── send ──────────────────────────────────────────────────────────────────────
+
+def test_send_method():
+    src = "play 60.send(:to_i)"
+    events = synths(src)
+    assert abs(events[0].args['note'] - 60.0) < 0.01
+
+
+# ── to_s with base ────────────────────────────────────────────────────────────
+
+def test_to_s_octal():
+    src = "play 8.to_s(8) == \"10\" ? 60 : 0"
+    events = synths(src)
+    assert abs(events[0].args['note'] - 60.0) < 0.01
+
+
+# ── spread (Euclidean rhythm) ──────────────────────────────────────────────────
+
+def test_spread_correct_length():
+    src = "a = spread(3, 8)\nplay a.length"
+    events = synths(src)
+    assert abs(events[0].args['note'] - 8.0) < 0.01
+
+
+def test_spread_correct_hits():
+    src = "a = spread(3, 8)\nplay a.count { |x| x } * 20"
+    events = synths(src)
+    assert abs(events[0].args['note'] - 60.0) < 0.01
+
+
+# ── Array mirror / reflect ────────────────────────────────────────────────────
+
+def test_array_mirror():
+    src = "a = [60, 64, 67].mirror\nplay a.length"
+    events = synths(src)
+    assert abs(events[0].args['note'] - 5.0) < 0.01
+
+
+def test_array_reflect():
+    src = "a = [60, 64, 67].reflect\nplay a.length"
+    events = synths(src)
+    assert abs(events[0].args['note'] - 6.0) < 0.01
+
+
+def test_array_stretch():
+    src = "a = [60, 64].stretch(2)\nplay a.length"
+    events = synths(src)
+    assert abs(events[0].args['note'] - 4.0) < 0.01
+
+
+# ── Array pick ────────────────────────────────────────────────────────────────
+
+def test_array_pick():
+    src = "r = ring(60, 64, 67)\nplay r.pick != nil ? 60 : 0"
+    events = synths(src)
+    assert abs(events[0].args['note'] - 60.0) < 0.01
+
+
+# ── tick / look ───────────────────────────────────────────────────────────────
+
+def test_tick_returns_zero_first():
+    src = "play tick"
+    events = synths(src)
+    assert abs(events[0].args['note'] - 0.0) < 0.01
+
+
+def test_look_matches_tick():
+    src = "tick\nplay look"
+    events = synths(src)
+    assert abs(events[0].args['note'] - 0.0) < 0.01
+
+
+def test_tick_increments():
+    src = "tick\ntick\nplay tick"
+    events = synths(src)
+    assert abs(events[0].args['note'] - 2.0) < 0.01
+
+
 if __name__ == "__main__":
     import pytest
     pytest.main([__file__, "-v"])

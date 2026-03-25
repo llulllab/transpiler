@@ -7,13 +7,14 @@ produced by tokenizer.py.
 from __future__ import annotations
 from typing import Optional
 
-from .tokenizer import Token, TT, tokenize
+from .tokenizer import Token, TT, tokenize, KEYWORDS
 from .ast_nodes import (
     Node, Program, Block,
     IntLit, FloatLit, StringLit, SymbolLit, BoolLit, NilLit, ArrayLit, RangeLit,
     Identifier, Assign, BinOp, UnaryOp, MethodCall,
     IfStmt, WhileStmt, ReturnStmt, CaseStmt, FuncDef,
     MultiAssign, TernaryExpr, HashLit,
+    StringInterp, BeginRescue, RaiseStmt, YieldExpr, ClassDef, ModuleDef,
 )
 
 
@@ -120,15 +121,26 @@ class Parser:
         if self.match(TT.DEF):
             return self._parse_def()
 
-        # Multiple assignment:  a, b = x, y
-        if self.cur.type == TT.IDENT:
-            # Look ahead for  IDENT COMMA IDENT ... ASSIGN
+        # Multiple assignment:  a, b = x, y   or   a, b, *rest = arr
+        if self.cur.type in (TT.IDENT, TT.STAR):
+            # Look ahead for  (IDENT|*IDENT) COMMA ... ASSIGN
             scan = self.pos
             names: list[str] = []
-            while (scan < len(self.tokens)
-                   and self.tokens[scan].type == TT.IDENT):
-                names.append(self.tokens[scan].value)
-                scan += 1
+            while scan < len(self.tokens):
+                tok = self.tokens[scan]
+                if tok.type == TT.STAR:
+                    # *rest splat
+                    scan += 1
+                    if scan < len(self.tokens) and self.tokens[scan].type == TT.IDENT:
+                        names.append('*' + self.tokens[scan].value)
+                        scan += 1
+                    else:
+                        names.append('*')
+                elif tok.type == TT.IDENT:
+                    names.append(tok.value)
+                    scan += 1
+                else:
+                    break
                 if (scan < len(self.tokens)
                         and self.tokens[scan].type == TT.COMMA):
                     scan += 1  # skip comma
@@ -139,11 +151,9 @@ class Parser:
                     and self.tokens[scan].type == TT.ASSIGN
                     and (scan + 1 >= len(self.tokens)
                          or self.tokens[scan + 1].type != TT.ASSIGN)):
-                # consume all the names and commas we scanned
-                for _ in names:
-                    self.advance()          # IDENT
-                    if self.match(TT.COMMA):
-                        self.advance()      # COMMA
+                # consume all the names, stars, and commas we scanned
+                while self.pos < scan:
+                    self.advance()
                 self.advance()              # ASSIGN
                 values: list[Node] = []
                 values.append(self._parse_expr())
@@ -165,24 +175,50 @@ class Parser:
             val = self._parse_expr()
             return Assign(name, BinOp(op, Identifier(name), val))
 
-        # ||= assignment
-        if self.cur.type == TT.IDENT and self.peek().type == TT.OR_ASSIGN:
-            name = self.advance().value
-            self.advance()  # consume ||=
-            val = self._parse_expr()
-            # x ||= v  →  x = x || v
-            return Assign(name, BinOp('or', Identifier(name), val))
+        # Quick path for bare  ident = expr  and  ident ||= expr
+        if self.cur.type == TT.IDENT:
+            if self.peek().type == TT.OR_ASSIGN:
+                name = self.advance().value
+                self.advance()  # consume ||=
+                val = self._parse_expr()
+                return Assign(name, BinOp('or', Identifier(name), val))
+            if (self.peek().type == TT.ASSIGN
+                    and self.peek(2).type != TT.ASSIGN):
+                name = self.advance().value
+                self.advance()  # consume '='
+                val = self._parse_expr()
+                return Assign(name, val)
 
-        # Plain assignment:  ident = expr   (but not ==)
-        if (self.cur.type == TT.IDENT
-                and self.peek().type == TT.ASSIGN
-                and self.peek(2).type != TT.ASSIGN):
-            name = self.advance().value
-            self.advance()  # consume '='
-            val = self._parse_expr()
-            return Assign(name, val)
+        # General expression — may be followed by compound assignment
+        node = self._parse_expr()
 
-        return self._parse_expr()
+        # Subscript / attr compound assignment:  expr[k] ||= v  /  expr[k] += v
+        if self.match(TT.OR_ASSIGN):
+            self.advance()
+            rhs = self._parse_expr()
+            if isinstance(node, Identifier):
+                return Assign(node.name, BinOp('or', node, rhs))
+            if isinstance(node, MethodCall) and node.method == '[]':
+                return MethodCall(node.receiver, '[]=',
+                                  node.args + [BinOp('or', node, rhs)], {}, None)
+        elif self.match(TT.PLUS_ASSIGN):
+            self.advance()
+            rhs = self._parse_expr()
+            if isinstance(node, Identifier):
+                return Assign(node.name, BinOp('+', node, rhs))
+            if isinstance(node, MethodCall) and node.method == '[]':
+                return MethodCall(node.receiver, '[]=',
+                                  node.args + [BinOp('+', node, rhs)], {}, None)
+        elif self.match(TT.MINUS_ASSIGN):
+            self.advance()
+            rhs = self._parse_expr()
+            if isinstance(node, Identifier):
+                return Assign(node.name, BinOp('-', node, rhs))
+            if isinstance(node, MethodCall) and node.method == '[]':
+                return MethodCall(node.receiver, '[]=',
+                                  node.args + [BinOp('-', node, rhs)], {}, None)
+
+        return node
 
     # ── Expressions ─────────────────────────────────────────────────────
 
@@ -235,9 +271,19 @@ class Parser:
         return self._parse_comparison()
 
     def _parse_comparison(self) -> Node:
-        left = self._parse_additive()
+        left = self._parse_bitwise()
         while self.match(TT.EQ, TT.NEQ, TT.LT, TT.GT, TT.LTE, TT.GTE):
             op = self.advance().value
+            right = self._parse_bitwise()
+            left = BinOp(op, left, right)
+        return left
+
+    def _parse_bitwise(self) -> Node:
+        """Handles &  |  bitwise / array-intersection / array-union operators."""
+        left = self._parse_additive()
+        while self.match(TT.AMPER, TT.PIPE):
+            op_tok = self.advance()
+            op = op_tok.value  # '&' or '|'
             right = self._parse_additive()
             left = BinOp(op, left, right)
         return left
@@ -352,7 +398,23 @@ class Parser:
             self.advance(); return FloatLit(t.value)
 
         if t.type == TT.STRING:
-            self.advance(); return StringLit(t.value)
+            self.advance()
+            val = t.value
+            if isinstance(val, list):
+                # Interpolated string — sub-parse each #{expr} part
+                parts = []
+                for kind, content in val:
+                    if kind == 'lit':
+                        parts.append(StringLit(content))
+                    else:
+                        try:
+                            sub_tokens = tokenize(content)
+                            sub_node = Parser(sub_tokens)._parse_expr()
+                            parts.append(sub_node)
+                        except Exception:
+                            parts.append(StringLit(''))
+                return StringInterp(parts)
+            return StringLit(val)
 
         if t.type == TT.SYMBOL:
             self.advance(); return SymbolLit(t.value)
@@ -382,6 +444,56 @@ class Parser:
             self.expect(TT.RPAREN)
             return expr
 
+        # Arrow lambda:  ->(x) { body }  or  -> { body }  or  -> (x) { body }
+        if t.type == TT.ARROW:
+            self.advance()
+            arrow_params: list[str] = []
+            if self.match(TT.LPAREN):
+                self.advance()
+                while not self.match(TT.RPAREN, TT.EOF):
+                    if self.match(TT.STAR):
+                        self.advance()
+                        if self.match(TT.IDENT):
+                            arrow_params.append('*' + self.advance().value)
+                    elif self.match(TT.AMPER):
+                        self.advance()
+                        if self.match(TT.IDENT):
+                            arrow_params.append('&' + self.advance().value)
+                    elif self.match(TT.IDENT):
+                        p = self.advance().value
+                        arrow_params.append(p)
+                        if self.match(TT.ASSIGN):
+                            self.advance()
+                            self._parse_arg_val()  # default — ignored for now
+                    if self.match(TT.COMMA):
+                        self.advance()
+                    elif not self.match(TT.RPAREN):
+                        break
+                self.expect(TT.RPAREN)
+            # Parse body as { } or do...end, but inject pre-parsed params
+            if self.match(TT.LBRACE):
+                self.advance()
+                # absorb any |params| if user also wrote them
+                if self.match(TT.PIPE):
+                    arrow_params = self._parse_block_params()
+                self.skip_newlines()
+                body = self._parse_body_until(TT.RBRACE)
+                if self.match(TT.RBRACE):
+                    self.advance()
+                blk = Block(arrow_params, body)
+            elif self.match(TT.DO):
+                self.advance()
+                if self.match(TT.PIPE):
+                    arrow_params = self._parse_block_params()
+                self.skip_newlines()
+                body = self._parse_body_until(TT.END)
+                if self.match(TT.END):
+                    self.advance()
+                blk = Block(arrow_params, body)
+            else:
+                return NilLit()
+            return MethodCall(None, 'lambda', [], {}, blk)
+
         if t.type == TT.IF:
             return self._parse_if()
 
@@ -403,18 +515,98 @@ class Parser:
     def _parse_ident_or_call(self) -> Node:
         name = self.advance().value  # consume IDENT
 
-        # begin ... end / begin ... rescue ... end
+        # begin ... rescue ... ensure ... end → BeginRescue
         if name == 'begin':
             self.skip_newlines()
-            body = self._parse_body_until(TT.END, TT.RESCUE, TT.ENSURE)
-            # skip rescue/ensure clauses (discard — static eval can't handle runtime errors)
-            while self.match(TT.RESCUE, TT.ENSURE):
+            body = self._parse_body_until(TT.END, TT.RESCUE, TT.ENSURE, TT.ELSE)
+            rescue_clauses = []
+            else_body = None
+            ensure_body = None
+            while self.match(TT.RESCUE):
+                self.advance()
+                exc_type = None
+                exc_var = None
+                # optional 'ExcType => var' or 'ExcType'
+                if (self.match(TT.IDENT)
+                        and self.cur.value and self.cur.value[0].isupper()
+                        and not self.match(TT.NEWLINE)):
+                    exc_type = self.advance().value
+                    # => var  (tokenised as ASSIGN GT IDENT)
+                    if self.match(TT.ASSIGN) and self.peek().type == TT.GT:
+                        self.advance()   # =
+                        self.advance()   # >
+                        if self.match(TT.IDENT):
+                            exc_var = self.advance().value
+                self.skip_newlines()
+                rc_body = self._parse_body_until(TT.END, TT.RESCUE, TT.ENSURE, TT.ELSE)
+                rescue_clauses.append((exc_type, exc_var, rc_body))
+            if self.match(TT.ELSE):
                 self.advance()
                 self.skip_newlines()
-                self._parse_body_until(TT.END, TT.RESCUE, TT.ENSURE)
+                else_body = self._parse_body_until(TT.END, TT.ENSURE)
+            if self.match(TT.ENSURE):
+                self.advance()
+                self.skip_newlines()
+                ensure_body = self._parse_body_until(TT.END)
             if self.match(TT.END):
                 self.advance()
-            return IfStmt(BoolLit(True), body, [], None)
+            return BeginRescue(body, rescue_clauses, else_body, ensure_body)
+
+        # raise expr  /  raise
+        if name == 'raise':
+            if self.match(TT.NEWLINE, TT.EOF, TT.END, TT.RESCUE, TT.ENSURE):
+                return RaiseStmt(None)
+            val = self._parse_expr()
+            return RaiseStmt(val)
+
+        # yield args  /  yield
+        if name == 'yield':
+            args: list[Node] = []
+            if not self.match(TT.NEWLINE, TT.EOF, TT.END, TT.ELSE, TT.ELSIF,
+                              TT.RPAREN, TT.RBRACKET, TT.THEN):
+                args, _ = self._parse_arg_list_implicit()
+            return YieldExpr(args)
+
+        # class Foo [< Bar] ... end  /  class << self ... end
+        if name == 'class':
+            if self.match(TT.LSHIFT):
+                # Singleton class  class << self
+                self.advance()
+                if self.match(TT.IDENT):
+                    self.advance()  # skip receiver
+                self.skip_newlines()
+                body = self._parse_body_until(TT.END)
+                if self.match(TT.END):
+                    self.advance()
+                return IfStmt(BoolLit(True), body, [], None)
+            class_name = self.advance().value if self.match(TT.IDENT) else 'Unknown'
+            superclass = None
+            if self.match(TT.LT):
+                self.advance()
+                if self.match(TT.IDENT):
+                    superclass = self.advance().value
+                    # Foo::Bar style
+                    while self.match(TT.SCOPE) and self.peek().type == TT.IDENT:
+                        self.advance()
+                        superclass += '::' + self.advance().value
+            self.skip_newlines()
+            body = self._parse_body_until(TT.END)
+            if self.match(TT.END):
+                self.advance()
+            return ClassDef(class_name, superclass, body)
+
+        # module Bar ... end
+        if name == 'module':
+            mod_name = self.advance().value if self.match(TT.IDENT) else 'Unknown'
+            self.skip_newlines()
+            body = self._parse_body_until(TT.END)
+            if self.match(TT.END):
+                self.advance()
+            return ModuleDef(mod_name, body)
+
+        # self  (bare or as receiver before dot — handled by postfix)
+        if name == 'self':
+            return Identifier('__self__')
 
         # Explicit parens:  method(args)
         if self.match(TT.LPAREN):
@@ -739,25 +931,31 @@ class Parser:
     def _parse_def(self) -> FuncDef:
         self.expect(TT.DEF)
         name = self.expect(TT.IDENT).value
+        # def self.method_name
+        if name == 'self' and self.match(TT.DOT):
+            self.advance()  # consume .
+            name = self.expect(TT.IDENT).value
         params: list[str] = []
         defaults: dict = {}
         if self.match(TT.LPAREN):
             self.advance()
             while not self.match(TT.RPAREN, TT.EOF):
-                splat = False
                 if self.match(TT.STAR):
                     self.advance()
-                    splat = True
-                if self.match(TT.IDENT):
+                    if self.match(TT.IDENT):
+                        params.append('*' + self.advance().value)
+                elif self.match(TT.AMPER):
+                    # &block_param — block passed to method
+                    self.advance()
+                    if self.match(TT.IDENT):
+                        params.append('&' + self.advance().value)
+                elif self.match(TT.IDENT):
                     pname = self.advance().value
-                    if splat:
-                        params.append('*' + pname)
-                    else:
-                        params.append(pname)
-                        # optional default value:  param = expr
-                        if self.match(TT.ASSIGN):
-                            self.advance()
-                            defaults[pname] = self._parse_arg_val()
+                    params.append(pname)
+                    # optional default value:  param = expr
+                    if self.match(TT.ASSIGN):
+                        self.advance()
+                        defaults[pname] = self._parse_arg_val()
                 if self.match(TT.COMMA):
                     self.advance()
                 elif not self.match(TT.RPAREN):

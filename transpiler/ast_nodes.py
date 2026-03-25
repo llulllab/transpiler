@@ -157,6 +157,44 @@ class HashLit(Node):
     pairs: dict  # str → Node (kwarg-style keys only for now)
 
 
+@dataclass
+class StringInterp(Node):
+    """Interpolated string: "Hello #{name}!" — parts is list of StringLit|Node."""
+    parts: list
+
+
+@dataclass
+class BeginRescue(Node):
+    """begin...rescue...ensure...end"""
+    body: list
+    rescue_clauses: list  # [(exc_type: str|None, var: str|None, body: list), ...]
+    else_body: Optional[list]
+    ensure_body: Optional[list]
+
+
+@dataclass
+class RaiseStmt(Node):
+    value: Optional[Node]
+
+
+@dataclass
+class YieldExpr(Node):
+    args: list
+
+
+@dataclass
+class ClassDef(Node):
+    name: str
+    superclass: Optional[str]
+    body: list
+
+
+@dataclass
+class ModuleDef(Node):
+    name: str
+    body: list
+
+
 # ---------------------------------------------------------------------------
 # Top-level
 # ---------------------------------------------------------------------------
