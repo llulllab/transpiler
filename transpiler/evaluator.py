@@ -47,6 +47,7 @@ class SoundEvent:
       'sample'   – play a sample file     (SC: /s_new basic_*_player)
       'fx_open'  – open an FX synth       (SC: /s_new at fx_start)
       'fx_close' – free the FX synth node (SC: /n_free at fx_end)
+      'control'  – update params on a running node (SC: /n_set)
     """
     time: float          # absolute time in seconds
     kind: str
@@ -732,8 +733,8 @@ class Evaluator:
             'min':                 self._call_min_standalone,
             'max':                 self._call_max_standalone,
             'abs':                 self._call_abs_standalone,
-            # Node control (noops for static analysis)
-            'control':             self._call_noop,
+            # Node control
+            'control':             self._call_control,
             'live_audio':          self._call_noop,
             'kill':                self._call_noop,
             'with_arg_bpm_scaling': self._call_with_block_noop,
@@ -2457,7 +2458,10 @@ class Evaluator:
         # Apply pitch offset
         pitch = self._to_float(merged.pop('pitch', 0), 0.0)
 
+        last_event = None
+
         def emit_one(n_raw):
+            nonlocal last_event
             midi = self._resolve_note(n_raw)
             if midi is None:
                 return
@@ -2471,13 +2475,14 @@ class Evaluator:
             a.setdefault('sustain', 0.0)
             a.setdefault('release', 1.0)
             a['out_bus'] = self._current_bus_out()
-            self._emit_synth(self._current_synth, a)
+            last_event = self._emit_synth(self._current_synth, a)
 
         if isinstance(note_val, list):
             for n in note_val:
                 emit_one(n)
         else:
             emit_one(note_val)
+        return last_event
 
     # ── synth ────────────────────────────────────────────────────────────
 
@@ -2523,7 +2528,7 @@ class Evaluator:
         merged.setdefault('release', 1.0)
         merged['out_bus'] = self._current_bus_out()
 
-        self._emit_synth(synth_name, merged)
+        return self._emit_synth(synth_name, merged)
 
     # ── sample ───────────────────────────────────────────────────────────
 
@@ -2774,6 +2779,25 @@ class Evaluator:
     def _call_break(self, node: MethodCall):
         args, _ = self._eval_args(node)
         raise _BreakSignal(args[0] if args else None)
+
+    def _call_control(self, node: MethodCall):
+        """control node, param: val – emit a parameter-update event for a running synth node."""
+        args, kwargs = self._eval_args(node)
+        if not args or not isinstance(args[0], SoundEvent):
+            return None
+        target: SoundEvent = args[0]
+        if not kwargs:
+            return None
+        evt = SoundEvent(
+            time=self._time_secs,
+            kind='control',
+            synth_name=target.synth_name,
+            node_id=target.node_id,
+            args=dict(kwargs),
+            bus_out=target.bus_out,
+        )
+        self.events.append(evt)
+        return evt
 
     def _call_noop(self, node: MethodCall):
         return None
