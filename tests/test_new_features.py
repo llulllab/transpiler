@@ -1299,6 +1299,35 @@ def test_synth_names_not_empty():
     assert len([e for e in events if e.kind == 'synth']) == 1
 
 
+# ── begin/end and begin/rescue/end ────────────────────────────────────────
+
+def test_begin_end_value():
+    events = synths("x = begin\n  60\nend\nplay x")
+    assert abs(events[0].args['note'] - 60.0) < 0.01
+
+
+def test_begin_rescue_uses_begin_body():
+    events = synths("x = begin\n  60\nrescue\n  0\nend\nplay x")
+    assert abs(events[0].args['note'] - 60.0) < 0.01
+
+
+def test_begin_ensure():
+    events = synths("x = begin\n  60\nensure\n  puts \"done\"\nend\nplay x")
+    assert abs(events[0].args['note'] - 60.0) < 0.01
+
+
+# ── case/when multi-value ────────────────────────────────────────────────
+
+def test_case_when_multi_value():
+    events = synths("n = 3\ncase n\nwhen 1, 2 then play 64\nwhen 3, 4 then play 60\nend")
+    assert abs(events[0].args['note'] - 60.0) < 0.01
+
+
+def test_case_when_multi_first():
+    events = synths("n = 1\ncase n\nwhen 1, 2 then play 60\nwhen 3 then play 64\nend")
+    assert abs(events[0].args['note'] - 60.0) < 0.01
+
+
 # ── Math::PI / scope resolution :: ───────────────────────────────────────
 
 def test_math_pi():

@@ -40,6 +40,8 @@ class TT(Enum):
     RETURN    = auto()
     CASE      = auto()
     WHEN      = auto()
+    RESCUE    = auto()
+    ENSURE    = auto()
     # Boolean operators
     AND       = auto()
     OR        = auto()
@@ -102,6 +104,8 @@ KEYWORDS: dict[str, TT] = {
     'return': TT.RETURN,
     'case':   TT.CASE,
     'when':   TT.WHEN,
+    'rescue': TT.RESCUE,
+    'ensure': TT.ENSURE,
     'and':    TT.AND,
     'or':     TT.OR,
     'not':    TT.NOT,

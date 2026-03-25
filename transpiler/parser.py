@@ -392,6 +392,19 @@ class Parser:
     def _parse_ident_or_call(self) -> Node:
         name = self.advance().value  # consume IDENT
 
+        # begin ... end / begin ... rescue ... end
+        if name == 'begin':
+            self.skip_newlines()
+            body = self._parse_body_until(TT.END, TT.RESCUE, TT.ENSURE)
+            # skip rescue/ensure clauses (discard — static eval can't handle runtime errors)
+            while self.match(TT.RESCUE, TT.ENSURE):
+                self.advance()
+                self.skip_newlines()
+                self._parse_body_until(TT.END, TT.RESCUE, TT.ENSURE)
+            if self.match(TT.END):
+                self.advance()
+            return IfStmt(BoolLit(True), body, [], None)
+
         # Explicit parens:  method(args)
         if self.match(TT.LPAREN):
             self.advance()
@@ -678,7 +691,12 @@ class Parser:
         while not self.match(TT.END, TT.EOF):
             if self.match(TT.WHEN):
                 self.advance()
-                val = self._parse_expr()
+                # Collect comma-separated when values → wrap in ArrayLit if multiple
+                vals = [self._parse_expr()]
+                while self.match(TT.COMMA):
+                    self.advance()
+                    vals.append(self._parse_expr())
+                val = ArrayLit(vals) if len(vals) > 1 else vals[0]
                 if self.match(TT.THEN):
                     self.advance()
                 self.skip_newlines()
