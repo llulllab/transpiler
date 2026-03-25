@@ -99,6 +99,14 @@ class _ReturnSignal(Exception):
     """Internal: raised by 'return' inside a user function."""
     def __init__(self, value): self.value = value
 
+class _NextSignal(Exception):
+    """Internal: raised by 'next' inside a loop iteration."""
+    pass
+
+class _BreakSignal(Exception):
+    """Internal: raised by 'break' inside a loop."""
+    def __init__(self, value=None): self.value = value
+
 
 class Evaluator:
     """
@@ -265,7 +273,7 @@ class Evaluator:
                       'beat', 'current_beat', 'current_bpm', 'current_synth',
                       'current_synth_name', 'current_time', 'current_time_in_beats',
                       'chord_names', 'scale_names', 'sample_names', 'synth_names',
-                      'free_all'}
+                      'free_all', 'next', 'break'}
 
     def _eval_body_last(self, stmts: list) -> Any:
         """Evaluate body statements, returning the last expression's value."""
@@ -329,7 +337,13 @@ class Evaluator:
             if n.op == '-':  return l - r
             if n.op == '*':  return l * r
             if n.op == '/':  return l / r if r else 0
-            if n.op == '%':  return l % r if r else 0
+            if n.op == '%':
+                if isinstance(l, str):
+                    try:
+                        return l % (tuple(r) if isinstance(r, list) else r)
+                    except Exception:
+                        return l
+                return l % r if r else 0
             if n.op == '**': return l ** r
             if n.op == '==': return l == r
             if n.op == '!=': return l != r
@@ -343,6 +357,12 @@ class Evaluator:
                 if isinstance(l, list):
                     l.append(r)
                     return l
+                if isinstance(l, str):
+                    new_str = l + str(r) if r is not None else l
+                    # Ruby strings are mutable: update the variable so s << x mutates s
+                    if isinstance(n.left, Identifier):
+                        self._variables[n.left.name] = new_str
+                    return new_str
                 if isinstance(l, int) and isinstance(r, int):
                     return l << r
                 return l
@@ -375,7 +395,12 @@ class Evaluator:
     def _eval_WhileStmt(self, n: WhileStmt):
         guard = 0
         while self._eval_node(n.condition) and guard < 10_000:
-            self._eval_body(n.body)
+            try:
+                self._eval_body(n.body)
+            except _NextSignal:
+                pass
+            except _BreakSignal:
+                break
             guard += 1
 
     def _eval_ReturnStmt(self, n: ReturnStmt):
@@ -558,6 +583,13 @@ class Evaluator:
             'with_tuning':         self._call_with_block_noop,
             # Synth info
             'synth_names':         self._call_synth_names,
+            # String formatting
+            'format':              self._call_format,
+            'sprintf':             self._call_format,
+            # Standalone math / utility
+            'min':                 self._call_min_standalone,
+            'max':                 self._call_max_standalone,
+            'abs':                 self._call_abs_standalone,
             # Node control (noops for static analysis)
             'control':             self._call_noop,
             'live_audio':          self._call_noop,
@@ -588,6 +620,9 @@ class Evaluator:
             'load_synthdefs':      self._call_noop,
             'free_all':            self._call_noop,
             'with_efx':            self._call_with_fx,   # alias
+            # Loop control
+            'next':                self._call_next,
+            'break':               self._call_break,
         }
 
         handler = dispatch.get(method)
@@ -634,6 +669,13 @@ class Evaluator:
             if method == 'E':      return math.e
             return None
 
+        # Hash.new(default_val) / String.new
+        if recv_val == 'Hash' and method == 'new':
+            return {}
+        if recv_val == 'String' and method == 'new':
+            args = [self._eval_node(a) for a in node.args]
+            return str(args[0]) if args else ''
+
         # Array class methods  Array.new(n, val) / Array.new(n) { |i| ... }
         if recv_val == 'Array' and method == 'new':
             args = [self._eval_node(a) for a in node.args]
@@ -679,7 +721,12 @@ class Evaluator:
                 for i in range(n):
                     if node.block.params:
                         self._variables[node.block.params[0]] = i
-                    self._eval_body(node.block.body)
+                    try:
+                        self._eval_body(node.block.body)
+                    except _NextSignal:
+                        continue
+                    except _BreakSignal:
+                        break
             return None
 
         if method == 'upto' and isinstance(recv_val, (int, float)) and node.block:
@@ -688,7 +735,12 @@ class Evaluator:
             for i in range(int(recv_val), end + 1):
                 if node.block.params:
                     self._variables[node.block.params[0]] = i
-                self._eval_body(node.block.body)
+                try:
+                    self._eval_body(node.block.body)
+                except _NextSignal:
+                    continue
+                except _BreakSignal:
+                    break
             return None
 
         if method == 'downto' and isinstance(recv_val, (int, float)) and node.block:
@@ -697,7 +749,12 @@ class Evaluator:
             for i in range(int(recv_val), end - 1, -1):
                 if node.block.params:
                     self._variables[node.block.params[0]] = i
-                self._eval_body(node.block.body)
+                try:
+                    self._eval_body(node.block.body)
+                except _NextSignal:
+                    continue
+                except _BreakSignal:
+                    break
             return None
 
         # N.to_f / N.to_i / N.abs / N.floor / N.ceil / N.round
@@ -775,14 +832,24 @@ class Evaluator:
             for item in recv_val:
                 if node.block.params:
                     self._variables[node.block.params[0]] = item
-                self._eval_body(node.block.body)
+                try:
+                    self._eval_body(node.block.body)
+                except _NextSignal:
+                    continue
+                except _BreakSignal:
+                    break
             return None
         if method == 'each_with_index' and isinstance(recv_val, list) and node.block:
             for i, item in enumerate(recv_val):
                 if len(node.block.params) >= 2:
                     self._variables[node.block.params[0]] = item
                     self._variables[node.block.params[1]] = i
-                self._eval_body(node.block.body)
+                try:
+                    self._eval_body(node.block.body)
+                except _NextSignal:
+                    continue
+                except _BreakSignal:
+                    break
             return None
 
         # Additional list operations
@@ -791,8 +858,21 @@ class Evaluator:
         if method == 'max' and isinstance(recv_val, list):
             return max(recv_val) if recv_val else None
         if method == 'sum' and isinstance(recv_val, list):
-            return sum(recv_val) if recv_val else 0
+            args = [self._eval_node(a) for a in node.args]
+            initial = args[0] if args else 0
+            try:
+                return initial + (sum(recv_val) if recv_val else 0)
+            except TypeError:
+                return initial
         if method in ('count', 'size', 'len') and isinstance(recv_val, list):
+            if method == 'count' and node.block:
+                n = 0
+                for item in recv_val:
+                    if node.block.params:
+                        self._variables[node.block.params[0]] = item
+                    if self._eval_body_last(node.block.body):
+                        n += 1
+                return n
             return len(recv_val)
         if method == 'sort' and isinstance(recv_val, list):
             try:
@@ -813,15 +893,17 @@ class Evaluator:
             except TypeError:
                 return result
         if method == 'flatten' and isinstance(recv_val, list):
-            def _flat(lst):
+            args_f = [self._eval_node(a) for a in node.args]
+            depth = int(args_f[0]) if args_f else None
+            def _flat(lst, d):
                 out = []
                 for item in lst:
-                    if isinstance(item, list):
-                        out.extend(_flat(item))
+                    if isinstance(item, list) and (d is None or d > 0):
+                        out.extend(_flat(item, None if d is None else d - 1))
                     else:
                         out.append(item)
                 return out
-            return _flat(recv_val)
+            return _flat(recv_val, depth)
         if method == 'compact' and isinstance(recv_val, list):
             return [x for x in recv_val if x is not None]
         if method == 'uniq' and isinstance(recv_val, list):
@@ -835,8 +917,8 @@ class Evaluator:
             return args[0] in recv_val if args else False
         if method == 'zip' and isinstance(recv_val, list):
             args = [self._eval_node(a) for a in node.args]
-            other = args[0] if args and isinstance(args[0], list) else []
-            return [[recv_val[i], other[i] if i < len(other) else None]
+            others = [a if isinstance(a, list) else [] for a in args]
+            return [[recv_val[i]] + [o[i] if i < len(o) else None for o in others]
                     for i in range(len(recv_val))]
         if method == 'take' and isinstance(recv_val, list):
             args = [self._eval_node(a) for a in node.args]
@@ -965,11 +1047,42 @@ class Evaluator:
             sep = str(args[0]) if args else ' '
             return recv_val.split(sep)
 
-        # Array []
+        # Subscript assignment  obj[k] = v
+        if method == '[]=' :
+            args = [self._eval_node(a) for a in node.args]
+            if isinstance(recv_val, dict):
+                key = str(args[0]).lstrip(':') if args else ''
+                val = args[1] if len(args) > 1 else None
+                recv_val[key] = val
+                return val
+            if isinstance(recv_val, list):
+                idx = int(args[0]) if args else 0
+                val = args[1] if len(args) > 1 else None
+                # Grow list if needed
+                while idx >= len(recv_val):
+                    recv_val.append(None)
+                recv_val[idx] = val
+                return val
+            return None
+
+        # Array []  (also handles range slicing and negative indexing)
         if method == '[]' and isinstance(recv_val, list):
             args = [self._eval_node(a) for a in node.args]
-            idx = int(args[0]) if args else 0
-            return recv_val[idx % len(recv_val)] if recv_val else None
+            if not args or not recv_val:
+                return None
+            idx_val = args[0]
+            if isinstance(idx_val, list):
+                # range slice: arr[1..3] evaluates to a list of indices
+                return [recv_val[i % len(recv_val)] for i in idx_val if isinstance(i, int)]
+            idx = int(idx_val)
+            # Support negative indexing (Ruby: arr[-1] = last element)
+            if idx < 0:
+                return recv_val[idx] if abs(idx) <= len(recv_val) else None
+            if len(args) > 1:
+                # arr[start, length] slice
+                length = int(args[1])
+                return recv_val[idx:idx + length]
+            return recv_val[idx] if idx < len(recv_val) else None
 
         # Type checking
         if method in ('is_a?', 'kind_of?', 'instance_of?'):
@@ -1256,6 +1369,47 @@ class Evaluator:
             if method in ('empty?',):
                 return len(recv_val) == 0
 
+            if method == 'take_while' and node.block:
+                result = []
+                for item in recv_val:
+                    if node.block.params:
+                        self._variables[node.block.params[0]] = item
+                    if not self._eval_body_last(node.block.body):
+                        break
+                    result.append(item)
+                return result
+
+            if method == 'drop_while' and node.block:
+                dropping = True
+                result = []
+                for item in recv_val:
+                    if dropping:
+                        if node.block.params:
+                            self._variables[node.block.params[0]] = item
+                        if not self._eval_body_last(node.block.body):
+                            dropping = False
+                            result.append(item)
+                    else:
+                        result.append(item)
+                return result
+
+            if method in ('count',) and node.args:
+                args = [self._eval_node(a) for a in node.args]
+                return recv_val.count(args[0]) if args else len(recv_val)
+
+            if method == 'repeated_combination':
+                args = [self._eval_node(a) for a in node.args]
+                import itertools
+                n = int(args[0]) if args else 2
+                combos = list(itertools.combinations_with_replacement(recv_val, n))
+                if node.block:
+                    for c in combos:
+                        if node.block.params:
+                            self._variables[node.block.params[0]] = list(c)
+                        self._eval_body(node.block.body)
+                    return None
+                return [list(c) for c in combos]
+
             if method == 'to_s':
                 return '[' + ', '.join(str(x) for x in recv_val) + ']'
 
@@ -1397,6 +1551,103 @@ class Evaluator:
                         self._variables[params[1]] = acc
                     self._eval_body(node.block.body)
                 return acc
+            if method == 'transform_values' and node.block:
+                result = {}
+                for k, v in recv_val.items():
+                    if node.block.params:
+                        self._variables[node.block.params[0]] = v
+                    result[k] = self._eval_body_last(node.block.body)
+                return result
+            if method == 'transform_keys' and node.block:
+                result = {}
+                for k, v in recv_val.items():
+                    if node.block.params:
+                        self._variables[node.block.params[0]] = k
+                    new_key = self._eval_body_last(node.block.body)
+                    result[str(new_key) if new_key is not None else k] = v
+                return result
+            if method in ('filter', 'filter_map'):
+                # filter is alias for select on Hash
+                if node.block:
+                    result = {}
+                    for k, v in recv_val.items():
+                        params = node.block.params
+                        if len(params) >= 2:
+                            self._variables[params[0]] = k
+                            self._variables[params[1]] = v
+                        elif params:
+                            self._variables[params[0]] = [k, v]
+                        if self._eval_body_last(node.block.body):
+                            result[k] = v
+                    return result
+                return recv_val
+            if method == 'invert':
+                return {str(v): k for k, v in recv_val.items()}
+            if method in ('to_h', 'dup', 'clone'):
+                return dict(recv_val)
+            if method == 'flatten':
+                result = []
+                for k, v in recv_val.items():
+                    result.append(k)
+                    result.append(v)
+                return result
+            if method in ('none?',) and node.block:
+                for k, v in recv_val.items():
+                    params = node.block.params
+                    if len(params) >= 2:
+                        self._variables[params[0]] = k
+                        self._variables[params[1]] = v
+                    if self._eval_body_last(node.block.body):
+                        return False
+                return True
+            if method == 'count':
+                if node.block:
+                    count = 0
+                    for k, v in recv_val.items():
+                        params = node.block.params
+                        if len(params) >= 2:
+                            self._variables[params[0]] = k
+                            self._variables[params[1]] = v
+                        elif params:
+                            self._variables[params[0]] = [k, v]
+                        if self._eval_body_last(node.block.body):
+                            count += 1
+                    return count
+                return len(recv_val)
+            if method == 'min_by' and node.block:
+                if not recv_val:
+                    return None
+                best = None
+                best_key = None
+                for k, v in recv_val.items():
+                    params = node.block.params
+                    if len(params) >= 2:
+                        self._variables[params[0]] = k
+                        self._variables[params[1]] = v
+                    elif params:
+                        self._variables[params[0]] = [k, v]
+                    score = self._eval_body_last(node.block.body)
+                    if best_key is None or (score is not None and score < best_key):
+                        best = [k, v]
+                        best_key = score
+                return best
+            if method == 'max_by' and node.block:
+                if not recv_val:
+                    return None
+                best = None
+                best_key = None
+                for k, v in recv_val.items():
+                    params = node.block.params
+                    if len(params) >= 2:
+                        self._variables[params[0]] = k
+                        self._variables[params[1]] = v
+                    elif params:
+                        self._variables[params[0]] = [k, v]
+                    score = self._eval_body_last(node.block.body)
+                    if best_key is None or (score is not None and score > best_key):
+                        best = [k, v]
+                        best_key = score
+                return best
             return None
 
         # ── Additional string methods ──────────────────────────────────────
@@ -1503,8 +1754,84 @@ class Evaluator:
                 except (ValueError, TypeError):
                     return 0.0
 
+        # ── Additional string methods (chr/ord) ───────────────────────────
+        if isinstance(recv_val, str):
+            if method == 'ord':
+                return ord(recv_val[0]) if recv_val else 0
+            if method == 'hex':
+                try:
+                    return int(recv_val, 16)
+                except Exception:
+                    return 0
+            if method == 'oct':
+                try:
+                    return int(recv_val, 8)
+                except Exception:
+                    return 0
+            if method == 'succ' or method == 'next':
+                if recv_val:
+                    return recv_val[:-1] + chr(ord(recv_val[-1]) + 1)
+                return recv_val
+            if method == 'swapcase':
+                return recv_val.swapcase()
+            if method == 'squeeze':
+                args = [self._eval_node(a) for a in node.args]
+                import re as _re
+                if args:
+                    ch = str(args[0])
+                    return _re.sub(f'[{_re.escape(ch)}]+', ch[0] if ch else '', recv_val)
+                return _re.sub(r'(.)\1+', r'\1', recv_val)
+            if method == 'scan':
+                args = [self._eval_node(a) for a in node.args]
+                import re as _re
+                pat = str(args[0]) if args else ''
+                try:
+                    return _re.findall(pat, recv_val)
+                except Exception:
+                    return []
+            if method == 'delete':
+                args = [self._eval_node(a) for a in node.args]
+                for a in args:
+                    recv_val = recv_val.replace(str(a), '')
+                return recv_val
+            if method == 'format':
+                args = [self._eval_node(a) for a in node.args]
+                try:
+                    return recv_val % (tuple(args) if len(args) > 1 else args[0]) if args else recv_val
+                except Exception:
+                    return recv_val
+            if method == 'slice' or method == '[]':
+                args_e = [self._eval_node(a) for a in node.args]
+                if args_e:
+                    try:
+                        idx = int(args_e[0])
+                        if len(args_e) > 1:
+                            length = int(args_e[1])
+                            return recv_val[idx:idx + length]
+                        return recv_val[idx]
+                    except (IndexError, TypeError):
+                        return None
+                return None
+
         # ── Additional numeric methods ─────────────────────────────────────
         if isinstance(recv_val, (int, float)):
+            if method == 'chr' and isinstance(recv_val, int):
+                try:
+                    return chr(recv_val)
+                except (ValueError, OverflowError):
+                    return ''
+            if method in ('succ', 'next') and isinstance(recv_val, int):
+                return recv_val + 1
+            if method == 'pred' and isinstance(recv_val, int):
+                return recv_val - 1
+            if method == 'pow':
+                args = [self._eval_node(a) for a in node.args]
+                exp = args[0] if args else 1
+                mod = args[1] if len(args) > 1 else None
+                try:
+                    return pow(int(recv_val), int(exp), int(mod)) if mod is not None else recv_val ** exp
+                except Exception:
+                    return 0
             if method == 'gcd' and isinstance(recv_val, int):
                 args = [self._eval_node(a) for a in node.args]
                 other = int(args[0]) if args else 1
@@ -1554,7 +1881,16 @@ class Evaluator:
     # ── Helpers ──────────────────────────────────────────────────────────
 
     def _eval_args(self, node: MethodCall) -> tuple[list, dict]:
-        args = [self._eval_node(a) for a in node.args]
+        args = []
+        for a in node.args:
+            if isinstance(a, UnaryOp) and a.op == 'splat':
+                val = self._eval_node(a.operand)
+                if isinstance(val, list):
+                    args.extend(val)
+                elif val is not None:
+                    args.append(val)
+            else:
+                args.append(self._eval_node(a))
         kwargs = self._eval_kwargs(node.kwargs)
         return args, kwargs
 
@@ -1650,7 +1986,8 @@ class Evaluator:
         if not args:
             return None
 
-        note_val = args[0]
+        # Multiple positional args (from splat) → treat as chord list
+        note_val = args[0] if len(args) == 1 else args
 
         # on: false → skip
         if not kwargs.get('on', True):
@@ -1844,6 +2181,10 @@ class Evaluator:
                 self._eval_body(node.block.body)
             except StopIteration_:
                 break
+            except _BreakSignal:
+                break
+            except _NextSignal:
+                continue
         # Restore parent time/state so parallel live_loops all start at same base time
         self._restore_state(snap)
 
@@ -1968,6 +2309,13 @@ class Evaluator:
     def _call_stop(self, node: MethodCall):
         raise StopIteration_()
 
+    def _call_next(self, node: MethodCall):
+        raise _NextSignal()
+
+    def _call_break(self, node: MethodCall):
+        args, _ = self._eval_args(node)
+        raise _BreakSignal(args[0] if args else None)
+
     def _call_noop(self, node: MethodCall):
         return None
 
@@ -1997,6 +2345,10 @@ class Evaluator:
                 self._eval_body(node.block.body)
             except StopIteration_:
                 break
+            except _BreakSignal:
+                break
+            except _NextSignal:
+                continue
 
     def _call_use_random_seed(self, node: MethodCall):
         args, _ = self._eval_args(node)
@@ -2522,6 +2874,51 @@ class Evaluator:
         if ratio <= 0:
             return 0.0
         return 12.0 * math.log2(ratio)
+
+    # ── String formatting ────────────────────────────────────────────────
+
+    def _call_format(self, node: MethodCall) -> str:
+        args, _ = self._eval_args(node)
+        if not args:
+            return ''
+        fmt = str(args[0])
+        rest = args[1:]
+        try:
+            return fmt % (tuple(rest) if len(rest) > 1 else rest[0]) if rest else fmt
+        except Exception:
+            return fmt
+
+    # ── Standalone min / max / abs ───────────────────────────────────────
+
+    def _call_min_standalone(self, node: MethodCall) -> Any:
+        args, _ = self._eval_args(node)
+        if len(args) == 1 and isinstance(args[0], list):
+            return min(args[0]) if args[0] else None
+        if len(args) >= 2:
+            try:
+                return min(args)
+            except TypeError:
+                return args[0]
+        return args[0] if args else None
+
+    def _call_max_standalone(self, node: MethodCall) -> Any:
+        args, _ = self._eval_args(node)
+        if len(args) == 1 and isinstance(args[0], list):
+            return max(args[0]) if args[0] else None
+        if len(args) >= 2:
+            try:
+                return max(args)
+            except TypeError:
+                return args[0]
+        return args[0] if args else None
+
+    def _call_abs_standalone(self, node: MethodCall) -> Any:
+        args, _ = self._eval_args(node)
+        v = args[0] if args else 0
+        try:
+            return abs(v)
+        except TypeError:
+            return v
 
 
 # ---------------------------------------------------------------------------

@@ -97,6 +97,11 @@ class Parser:
             val = None
             if not self.match(TT.NEWLINE, TT.EOF, TT.END, TT.ELSE, TT.ELSIF):
                 val = self._parse_expr()
+            # Fix: `return val if cond` → IfStmt(cond, [ReturnStmt(val)], [], None)
+            # Without this, ReturnStmt(IfStmt(...)) raises _ReturnSignal(None) when cond is false
+            if (isinstance(val, IfStmt) and len(val.then_body) == 1
+                    and not val.elsif_clauses and val.else_body is None):
+                return IfStmt(val.condition, [ReturnStmt(val.then_body[0])], [], None)
             return ReturnStmt(val)
 
         # if / unless / while / case / def as statements
@@ -299,12 +304,18 @@ class Parser:
                 else:
                     break
 
-            # [index]
+            # [index]  or  [index] = val  (subscript assignment)
             elif self.match(TT.LBRACKET):
                 self.advance()
                 idx = self._parse_expr()
                 self.expect(TT.RBRACKET)
-                node = MethodCall(node, '[]', [idx], {}, None)
+                # Subscript assignment: obj[k] = v  →  obj.[]=(k, v)
+                if self.match(TT.ASSIGN) and self.peek().type != TT.ASSIGN:
+                    self.advance()  # consume =
+                    val = self._parse_expr()
+                    node = MethodCall(node, '[]=', [idx, val], {}, None)
+                else:
+                    node = MethodCall(node, '[]', [idx], {}, None)
 
             else:
                 break
@@ -441,14 +452,21 @@ class Parser:
         # MINUS can start args if it's a unary negation (next token has no space,
         # e.g.  foo -12  is foo(-12), but  foo - 12  is subtraction)
         if t.type == TT.MINUS:
-            # Unary negation  foo -12  → can start args when digit follows with no space
-            # Binary subtract foo - 12 → cannot start args (space around minus)
+            # Unary negation  foo -12  → space before '-', no space before digit
+            # Binary subtract foo - 12 → space before '-', space before digit
+            # Subtraction     n-1      → no space before '-' (attached to lhs)
             nxt = self.peek(1)  # token after the MINUS
-            return nxt.no_space_before and nxt.type in (TT.INT, TT.FLOAT)
+            return (not t.no_space_before) and nxt.no_space_before and nxt.type in (TT.INT, TT.FLOAT)
+        if t.type == TT.STAR:
+            # Splat: *arr in implicit args – only when followed by a value-starting token
+            # e.g.  play *chord(:C, :major)   → splat, starts args
+            # e.g.  a * b                     → multiplication (won't be called here)
+            nxt = self.peek(1)
+            return nxt.type in (TT.IDENT, TT.LPAREN, TT.LBRACKET)
         if t.type in (TT.NEWLINE, TT.EOF, TT.END, TT.ELSE, TT.ELSIF,
                       TT.RPAREN, TT.RBRACKET, TT.RBRACE,
                       TT.DOT, TT.ASSIGN, TT.DO, TT.LBRACE,
-                      TT.PLUS, TT.STAR, TT.SLASH, TT.PERCENT,
+                      TT.PLUS, TT.SLASH, TT.PERCENT,
                       TT.EQ, TT.NEQ, TT.LT, TT.GT, TT.LTE, TT.GTE,
                       TT.AND, TT.OR, TT.STARSTAR, TT.PIPE,
                       TT.DOTDOT, TT.COMMA, TT.LSHIFT,
@@ -470,6 +488,10 @@ class Parser:
                 key = self.advance().value
                 val = self._parse_arg_val()
                 kwargs[key] = val
+            elif self.match(TT.STAR):
+                # Splat: *arr → UnaryOp('splat', arr)
+                self.advance()
+                args.append(UnaryOp('splat', self._parse_arg_val()))
             elif not self.match(TT.RPAREN, TT.EOF):
                 args.append(self._parse_arg_val())
             self.skip_newlines()
@@ -489,6 +511,9 @@ class Parser:
                 key = self.advance().value
                 val = self._parse_arg_val()
                 kwargs[key] = val
+            elif self.match(TT.STAR):
+                self.advance()
+                args.append(UnaryOp('splat', self._parse_arg_val()))
             else:
                 args.append(self._parse_arg_val())
             if self.match(TT.COMMA):
