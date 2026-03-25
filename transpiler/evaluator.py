@@ -388,14 +388,19 @@ class Evaluator:
         subject = self._eval_node(n.expr) if n.expr else True
         for val_node, body in n.whens:
             val = self._eval_node(val_node)
-            # case expr; when val → subject == val
-            # case; when cond    → cond is truthy
-            match = (subject == val) if n.expr else bool(val)
+            if n.expr:
+                # Range/list containment check
+                if isinstance(val, list):
+                    match = subject in val
+                else:
+                    match = subject == val
+            else:
+                match = bool(val)
             if match:
-                self._eval_body(body)
-                return
+                return self._eval_body_last(body)
         if n.else_body:
-            self._eval_body(n.else_body)
+            return self._eval_body_last(n.else_body)
+        return None
 
     def _eval_FuncDef(self, n: FuncDef):
         # Store user-defined function/define

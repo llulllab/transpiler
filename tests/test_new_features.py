@@ -1299,6 +1299,66 @@ def test_synth_names_not_empty():
     assert len([e for e in events if e.kind == 'synth']) == 1
 
 
+# ── Math::PI / scope resolution :: ───────────────────────────────────────
+
+def test_math_pi():
+    events = synths("play Math::PI.to_i")
+    assert abs(events[0].args['note'] - 3.0) < 0.01
+
+
+def test_math_e():
+    events = synths("play Math::E.to_i")
+    assert abs(events[0].args['note'] - 2.0) < 0.01
+
+
+def test_scope_as_dot():
+    # :: used for module access should work like .
+    events = synths("play Math::sqrt(3600).to_i")
+    assert abs(events[0].args['note'] - 60.0) < 0.01
+
+
+# ── case/when range containment ──────────────────────────────────────────
+
+def test_case_when_range():
+    events = synths("n = 3\ncase n\nwhen 1..5\n  play 60\nend")
+    assert abs(events[0].args['note'] - 60.0) < 0.01
+
+
+def test_case_when_range_no_match():
+    events = synths("n = 10\ncase n\nwhen 1..5\n  play 60\nelse\n  play 64\nend")
+    assert abs(events[0].args['note'] - 64.0) < 0.01
+
+
+def test_case_when_multiple():
+    # Two separate when clauses
+    events = synths("n = 3\ncase n\nwhen 1\n  play 64\nwhen 3\n  play 60\nend")
+    assert abs(events[0].args['note'] - 60.0) < 0.01
+
+
+# ── case as expression ───────────────────────────────────────────────────
+
+def test_case_as_expression():
+    events = synths("y = case 60\nwhen 60 then 60\nelse 0\nend\nplay y")
+    assert abs(events[0].args['note'] - 60.0) < 0.01
+
+
+def test_case_else_expression():
+    events = synths("y = case 99\nwhen 60 then 60\nelse 64\nend\nplay y")
+    assert abs(events[0].args['note'] - 64.0) < 0.01
+
+
+# ── << operator (array append) ───────────────────────────────────────────
+
+def test_lshift_array_append():
+    events = synths("a = []\na << 60\na << 64\nplay a.size")
+    assert abs(events[0].args['note'] - 2.0) < 0.01
+
+
+def test_lshift_chain():
+    events = synths("a = []\na << 20 << 20 << 20\nplay a.sum")
+    assert abs(events[0].args['note'] - 60.0) < 0.01
+
+
 if __name__ == "__main__":
     import pytest
     pytest.main([__file__, "-v"])

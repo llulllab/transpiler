@@ -67,6 +67,7 @@ class TT(Enum):
     SLASH_ASSIGN = auto()   # /=
     OR_ASSIGN    = auto()   # ||=
     LSHIFT       = auto()   # <<  (append / left-shift)
+    SCOPE        = auto()   # ::  (scope resolution)
     # Punctuation
     DOT       = auto()      # .
     COMMA     = auto()      # ,
@@ -223,6 +224,8 @@ def tokenize(source: str) -> list[Token]:
             add(TT.DOTDOT, '..'); pos += 2; continue
         if two == '<<':
             add(TT.LSHIFT, '<<'); pos += 2; continue
+        if two == '::':
+            add(TT.SCOPE, '::'); pos += 2; continue
         if two == '+=':
             add(TT.PLUS_ASSIGN, '+='); pos += 2; continue
         if two == '-=':

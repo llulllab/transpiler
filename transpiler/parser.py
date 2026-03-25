@@ -277,7 +277,7 @@ class Parser:
 
         while True:
             # .method_name ...
-            if self.match(TT.DOT):
+            if self.match(TT.DOT, TT.SCOPE):
                 self.advance()
                 # .( args ) shorthand for .call( args )
                 if self.match(TT.LPAREN):
@@ -376,6 +376,9 @@ class Parser:
 
         if t.type == TT.UNLESS:
             return self._parse_unless()
+
+        if t.type == TT.CASE:
+            return self._parse_case()
 
         if t.type == TT.IDENT:
             return self._parse_ident_or_call()
