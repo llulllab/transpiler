@@ -898,6 +898,30 @@ class Evaluator:
             return None
 
         # Lambda / Proc call
+        if isinstance(recv_val, _Lambda):
+            if method in ('call', '[]', 'yield'):
+                args = [self._eval_node(a) for a in node.args]
+                saved = dict(self._variables)
+                self._variables.update(recv_val.closure)
+                for i, param in enumerate(recv_val.params):
+                    if param.startswith('*'):
+                        self._variables[param[1:]] = list(args[i:])
+                        break
+                    self._variables[param] = args[i] if i < len(args) else None
+                result = None
+                try:
+                    result = self._eval_body_last(recv_val.body)
+                except _ReturnSignal as r:
+                    result = r.value
+                self._variables = saved
+                return result
+            if method == 'lambda?':
+                return True
+            if method == 'arity':
+                return sum(1 for p in recv_val.params if not p.startswith('*'))
+            if method == 'curry':
+                return recv_val  # simplified — just return self
+
         if isinstance(recv_val, _Lambda) and method == 'call':
             args = [self._eval_node(a) for a in node.args]
             saved = dict(self._variables)
@@ -1314,7 +1338,9 @@ class Evaluator:
 
         if method == 'respond_to?':
             args = [self._eval_node(a) for a in node.args]
-            meth_name = str(args[0]) if args else ''
+            meth_name = str(args[0]).lstrip(':') if args else ''
+            if isinstance(recv_val, _Lambda):
+                return meth_name in ('call', '[]', 'yield', 'lambda?', 'arity', 'curry')
             if isinstance(recv_val, list):
                 return meth_name in ('each', 'map', 'select', 'reject', 'include?',
                                      'length', 'size', 'first', 'last', 'push', 'pop',
@@ -1817,9 +1843,25 @@ class Evaluator:
                 return len(recv_val)
             if method in ('empty?',):
                 return len(recv_val) == 0
-            if method == 'merge':
+            if method in ('merge', 'merge!') and isinstance(recv_val, dict):
                 args = [self._eval_node(a) for a in node.args]
                 other = args[0] if args and isinstance(args[0], dict) else {}
+                if node.block:
+                    for k, v in other.items():
+                        if k in recv_val:
+                            params = node.block.params
+                            if len(params) >= 3:
+                                self._variables[params[0]] = k
+                                self._variables[params[1]] = recv_val[k]
+                                self._variables[params[2]] = v
+                            recv_val[k] = self._eval_body_last(node.block.body)
+                        else:
+                            recv_val[k] = v
+                    return recv_val
+                if method == 'merge!':
+                    # Mutate in-place
+                    recv_val.update(other)
+                    return recv_val
                 result = dict(recv_val)
                 result.update(other)
                 return result
@@ -2040,6 +2082,33 @@ class Evaluator:
                 return recv_val.rstrip('\n\r')
             if method == 'chop':
                 return recv_val[:-1] if recv_val else ''
+            if method == 'each_char' and node.block:
+                for ch in recv_val:
+                    if node.block.params:
+                        self._variables[node.block.params[0]] = ch
+                    try:
+                        self._eval_body(node.block.body)
+                    except _NextSignal:
+                        continue
+                    except _BreakSignal:
+                        break
+                return recv_val
+
+            if method == 'each_line' and node.block:
+                for line in recv_val.splitlines(keepends=True):
+                    if node.block.params:
+                        self._variables[node.block.params[0]] = line
+                    try:
+                        self._eval_body(node.block.body)
+                    except _NextSignal:
+                        continue
+                    except _BreakSignal:
+                        break
+                return recv_val
+
+            if method == 'lines':
+                return recv_val.splitlines(keepends=True)
+
             if method == 'gsub':
                 args = [self._eval_node(a) for a in node.args]
                 pat = str(args[0]) if args else ''

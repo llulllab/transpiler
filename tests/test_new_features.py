@@ -2471,6 +2471,66 @@ def test_tick_increments():
     assert abs(events[0].args['note'] - 2.0) < 0.01
 
 
+# ── String each_char / each_line ─────────────────────────────────────────────
+
+def test_string_each_char():
+    src = "n = 0\n\"abc\".each_char { |c| n += 1 }\nplay n * 20"
+    events = synths(src)
+    assert abs(events[0].args['note'] - 60.0) < 0.01
+
+
+def test_string_each_line():
+    src = "n = 0\n\"a\\nb\\nc\".each_line { |l| n += 1 }\nplay n * 20"
+    events = synths(src)
+    assert abs(events[0].args['note'] - 60.0) < 0.01
+
+
+# ── Hash merge! in-place ──────────────────────────────────────────────────────
+
+def test_hash_merge_bang():
+    src = "h = {a: 50}\nh.merge!({a: 60})\nplay h[:a]"
+    events = synths(src)
+    assert abs(events[0].args['note'] - 60.0) < 0.01
+
+
+def test_hash_merge_with_block():
+    src = (
+        "h = {a: 50}\n"
+        "h.merge!({a: 10}) { |key, old, new_v| old + new_v }\n"
+        "play h[:a]"
+    )
+    events = synths(src)
+    assert abs(events[0].args['note'] - 60.0) < 0.01
+
+
+# ── Lambda lambda? / arity ────────────────────────────────────────────────────
+
+def test_lambda_is_lambda():
+    src = "f = lambda { |x| x }\nplay f.lambda? ? 60 : 0"
+    events = synths(src)
+    assert abs(events[0].args['note'] - 60.0) < 0.01
+
+
+def test_lambda_arity():
+    src = "f = ->(x, y) { x + y }\nplay f.arity"
+    events = synths(src)
+    assert abs(events[0].args['note'] - 2.0) < 0.01
+
+
+def test_lambda_respond_to_call():
+    src = "f = lambda { |x| x }\nplay f.respond_to?(:call) ? 60 : 0"
+    events = synths(src)
+    assert abs(events[0].args['note'] - 60.0) < 0.01
+
+
+# ── Array pick ────────────────────────────────────────────────────────────────
+
+def test_array_pick_multiple():
+    src = "a = ring(60, 64, 67)\npicked = a.pick(3)\nplay picked.length"
+    events = synths(src)
+    assert abs(events[0].args['note'] - 3.0) < 0.01
+
+
 if __name__ == "__main__":
     import pytest
     pytest.main([__file__, "-v"])
