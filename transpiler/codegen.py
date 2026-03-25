@@ -140,6 +140,8 @@ class SCNRTCodegen:
                 lines.extend(self._render_fx_open(evt))
             elif evt.kind == 'fx_close':
                 lines.extend(self._render_fx_close(evt))
+            elif evt.kind == 'control':
+                lines.extend(self._render_control(evt))
 
         return '\n'.join(lines) + '\n'
 
@@ -206,6 +208,17 @@ class SCNRTCodegen:
         t = evt.time
         nid = evt.node_id
         return [f'score = score.add([{t:.6f}, ["/n_free", {nid}]]);']
+
+    def _render_control(self, evt: SoundEvent) -> list[str]:
+        """Render a /n_set message to update parameters on a running synth node."""
+        t = evt.time
+        nid = evt.node_id
+        parts: list[str] = ['"/n_set"', str(nid)]
+        for k, v in evt.args.items():
+            parts.append(f'"{k}"')
+            parts.append(self._sc_val(v))
+        msg = '[' + ', '.join(parts) + ']'
+        return [f'score = score.add([{t:.6f}, {msg}]);']
 
     # ── Footer ───────────────────────────────────────────────────────────
 

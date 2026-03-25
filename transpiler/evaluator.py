@@ -288,7 +288,7 @@ class Evaluator:
                       'current_synth_name', 'current_time', 'current_time_in_beats',
                       'chord_names', 'scale_names', 'sample_names', 'synth_names',
                       'free_all', 'next', 'break', 'current_random_seed',
-                      '__method__'}
+                      '__method__', 'beat_duration', 'bar_duration'}
 
     def _eval_body_last(self, stmts: list) -> Any:
         """Evaluate body statements, returning the last expression's value."""
@@ -688,6 +688,8 @@ class Evaluator:
             'with_random_seed':    self._call_with_random_seed,
             # State getters
             'current_bpm':         self._call_current_bpm,
+            'beat_duration':       self._call_beat_duration,
+            'bar_duration':        self._call_bar_duration,
             'current_synth':       self._call_current_synth,
             'current_synth_name':  self._call_current_synth,
             'current_time':        self._call_beat,
@@ -2361,6 +2363,25 @@ class Evaluator:
         except (TypeError, ValueError):
             return default
 
+    # Tuning systems: cent offsets per semitone (0=C, 1=C#, ..., 11=B) relative to equal temperament.
+    # Values are in cents. Equal temperament = all zeros.
+    _TUNING_OFFSETS: dict[str, list[float]] = {
+        'equal':       [0.0] * 12,
+        'just':        [0.0, 11.73, 3.91, 15.64, -13.69, -1.96, -17.49, 1.96, 13.69, -15.64, -3.91, -11.73],
+        'pythagorean': [0.0, 13.69, 3.91, 17.60, -7.82,  1.96,  15.64,  -1.96, 11.73, 5.87,  19.55, -9.78],
+        'meantone':    [0.0, -10.26, 3.42, -6.84, 6.84,  -3.42,  10.26,  -6.84, 3.42, -13.68, 6.84, -3.42],
+    }
+
+    def _tuning_offset_cents(self, midi: float) -> float:
+        """Return cent offset for this note's pitch class under the current tuning."""
+        if self._tuning == 'equal':
+            return 0.0
+        offsets = self._TUNING_OFFSETS.get(self._tuning)
+        if not offsets:
+            return 0.0
+        semitone = int(round(midi)) % 12
+        return offsets[semitone]
+
     def _resolve_note(self, v: Any) -> float | None:
         if v is None:
             return None
@@ -2372,7 +2393,8 @@ class Evaluator:
             return None
         if midi is None:
             return None
-        return midi + self._transpose + self._octave * 12 + self._cent_tuning / 100.0
+        tuning_cents = self._tuning_offset_cents(midi)
+        return midi + self._transpose + self._octave * 12 + (self._cent_tuning + tuning_cents) / 100.0
 
     # ── sleep ────────────────────────────────────────────────────────────
 
@@ -3277,6 +3299,14 @@ class Evaluator:
 
     def _call_current_bpm(self, node: MethodCall) -> float:
         return self._bpm
+
+    def _call_beat_duration(self, node: MethodCall) -> float:
+        """beat_duration – seconds per beat at current BPM."""
+        return 60.0 / self._bpm
+
+    def _call_bar_duration(self, node: MethodCall) -> float:
+        """bar_duration – seconds per bar (4 beats) at current BPM."""
+        return 4.0 * 60.0 / self._bpm
 
     def _call_current_synth(self, node: MethodCall) -> str:
         return self._current_synth
